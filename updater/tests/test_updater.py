@@ -209,6 +209,17 @@ class UpdaterTests(unittest.TestCase):
             write_manifest(self.source, '0.0.1+1', 'Debug')
         self.assertFalse((self.source / MANIFEST).exists())
 
+    def test_manifest_regenerated_after_final_readme(self):
+        write_manifest(self.source, '0.0.2+2', 'Release')
+        (self.source / 'README.txt').write_text('OMG-Neo 0.0.2 final readme')
+        with self.assertRaises(UpdateError):
+            validate_payload(self.source)
+        write_manifest(self.source, '0.0.2+2', 'Release')
+        self.assertEqual(validate_payload(self.source)['version'], '0.0.2+2')
+        (self.source / 'AppData').mkdir()
+        with self.assertRaisesRegex(UpdateError, '洁净分发'):
+            write_manifest(self.source, '0.0.2+2', 'Release')
+
     def test_checksum_mismatch_and_wrong_sidecar_name(self):
         with self.assertRaisesRegex(UpdateError, 'SHA-256'):
             self.updater.apply(self.zip, '0' * 64)

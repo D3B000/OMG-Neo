@@ -25,7 +25,7 @@
 - 包名：使用英文、数字、点、下划线或连字符组成的单目录名；包含版本、模式和时间戳。
 - 根目录：默认 `omg_neo/dist/<本次批次>`，保留旧包；现有验证器只接受 dist 内的根目录。
 - 工具路径：本机 Flutter `F:\flutter\bin\flutter.bat`，Dart `F:\flutter\bin\dart.bat`，Python `F:\Python\Python311\python.exe`。重新确认存在，不能当作所有机器的约定。
-- 本地版本、时间和目标路径都应实际读取。`pubspec.yaml` 当前为 `0.0.1+1`，不是永远不变的默认。
+- 本地版本、时间和目标路径都应实际读取。`pubspec.yaml` 当前为 `0.0.2+2`（2026-10-27），不是永远不变的默认；下文命令中的旧包名示例需据此调整。
 
 ## 3. 目录边界与串行约束
 
@@ -149,7 +149,7 @@ if ($configuration -eq 'Debug') {
 if ($LASTEXITCODE -ne 0) { throw 'Distribution verification failed' }
 ```
 
-验证器会写 README，创建 ZIP、SHA-256 和 `validation/distribution-<包名>.json`，并在临时数据目录启动后端检查 hello/flush/shutdown。它不是只读检查；同名 ZIP 已存在时不会覆盖。版本文字仍固定为 v0.0.1，版本升级时先同步脚本。
+验证器会写 README，重新生成并验证最终文件的更新清单，创建 ZIP、SHA-256 和 `validation/distribution-<包名>.json`，并在临时数据目录启动后端检查 hello/flush/shutdown。它不是只读检查；同名 ZIP 已存在时不会覆盖。版本从 pubspec.yaml 读取并与 Windows EXE 的文件版本核对。
 
 可选传输层检查使用实际 Dart 客户端：
 

@@ -92,7 +92,7 @@ def verify_pe(path: Path):
             raise UpdateError(f'需要 Windows x64 程序：{path.name}')
 
 
-def validate_payload(root: Path) -> dict:
+def validate_payload(root: Path, *, verify_manifest: bool = True) -> dict:
     for name in ('omg_neo.exe', 'flutter_windows.dll', 'backend/omg_backend.exe',
                  'backend/omg_injector.exe', 'data/icudtl.dat'):
         if not (root / name).is_file():
@@ -108,7 +108,7 @@ def validate_payload(root: Path) -> dict:
         verify_pe(root / name)
     metadata = {'version': '未附版本清单', 'configuration': 'Debug' if debug else 'Release'}
     manifest_path = root / MANIFEST
-    if manifest_path.exists():
+    if verify_manifest and manifest_path.exists():
         if manifest_path.stat().st_size > 16 * 1024**2:
             raise UpdateError('更新清单过大。')
         manifest = json.loads(manifest_path.read_text(encoding='utf-8-sig'))
@@ -206,7 +206,11 @@ def inspect_package(path: Path, expected_sha256: str = '') -> Package:
 
 def write_manifest(root: Path, version: str, configuration: str):
     safe_tree(root)
-    metadata = validate_payload(root)
+    if any(not managed(path.name) for path in root.iterdir()):
+        raise UpdateError('只能为不含用户数据的洁净分发目录生成清单。')
+    # Producer operation: rebuild after final packaging metadata (README) changes.
+    # Installation still verifies the existing manifest with the default True.
+    metadata = validate_payload(root, verify_manifest=False)
     if metadata['configuration'] != configuration or not version.strip():
         raise UpdateError('清单模式与前端产物不一致，或版本为空。')
     files = {p.relative_to(root).as_posix(): {'size': p.stat().st_size, 'sha256': digest(p)}
