@@ -825,7 +825,7 @@ void main() {
     final point =
         tester.getCenter(find.byKey(const ValueKey('region.resources.cards')));
     final ratio = tester.view.devicePixelRatio;
-    Future<void> dropEvent(String method, Object arguments) async {
+    Future<void> dropEvent(String method, Object? arguments) async {
       await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
           'desktop_drop',
           const StandardMethodCodec()
@@ -834,6 +834,16 @@ void main() {
     }
 
     await dropEvent('entered', [point.dx * ratio, point.dy * ratio]);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('resources.drop-hint')), findsOneWidget);
+    expect(find.text('释放文件或文件夹以移入当前目录'), findsOneWidget);
+    expect(backend.calls, isNot(contains('resources.move')));
+    await dropEvent('exited', null);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('resources.drop-hint')), findsNothing);
+    await dropEvent('entered', [point.dx * ratio, point.dy * ratio]);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('resources.drop-hint')), findsOneWidget);
     await dropEvent(
         'performOperation', [r'C:\incoming\中文文件.ini', r'C:\incoming\folder']);
     await tester.pumpAndSettle();
@@ -841,6 +851,14 @@ void main() {
     expect(backend.parameters['resources.move']!['path'], '真实分组');
     expect(backend.parameters['resources.move']!['sources'],
         [r'C:\incoming\中文文件.ini', r'C:\incoming\folder']);
+    expect(find.byKey(const ValueKey('resources.drop-hint')), findsNothing);
+    await dropEvent('entered', [point.dx * ratio, point.dy * ratio]);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('resources.drop-hint')), findsNothing);
+    await dropEvent('performOperation', [r'C:\incoming\duplicate.ini']);
+    await tester.pumpAndSettle();
+    expect(backend.calls.where((method) => method == 'resources.move'),
+        hasLength(1));
     expect(find.byKey(const ValueKey('app.toast')), findsNothing);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());

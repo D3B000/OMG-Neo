@@ -21,6 +21,25 @@ class EfEyebrow extends StatelessWidget {
   }
 }
 
+/// Page overlay shown while files hover over an enabled drop target.
+class EfDropHint extends StatelessWidget {
+  const EfDropHint(this.en, this.zh, {super.key});
+  final String en, zh;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = EfColors.of(context);
+    return IgnorePointer(
+        child: Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+          color: c.panel.withValues(alpha: .96),
+          border: Border.all(color: c.ink)),
+      child: Center(child: EfPair(en, zh, size: 22)),
+    ));
+  }
+}
+
 /// English small above, Chinese bold below: the standard way to name a section.
 class EfPair extends StatelessWidget {
   const EfPair(this.en, this.zh, {super.key, this.size = 22});

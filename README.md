@@ -101,14 +101,18 @@ OMG-Neo/
 │   ├── tests/                # 后端测试
 │   ├── vendor/ritual/        # 必要原生依赖
 │   └── neo_hosts.spec        # PyInstaller 打包配置
-├── OMGLite/src/omg/          # 共享 core / domain 源码及 loader 资源
+├── OMGLite/src/omg/          # Neo 所需 core / domain 源码子集及 loader 资源
 ├── docs/screenshots/         # README 截图
 └── intro.md                  # 用户使用说明
 ```
 
 共享业务代码已收录在仓库中，构建无需旁边另放一份 OMGLite。旧文档中工作区级的 `OMGLite/src` 在此仓库中位于根目录下的 `OMGLite/src`。
 
+内置 OMGLite 已剔除未使用的旧页面控制器、窗口逻辑和媒体／模组工具，详见 [保留范围与清理记录](OMGLite/README.md)。
+
 仓库排除构建产物、下载的构建工程、日志、缓存及本机运行配置。`backend/vendor/ritual/` 与 loader 目录中的二进制是现有运行依赖，仓库不包含这些组件的全部原生构建源码。
+
+神秘仪式的 4 个原生依赖（`_cython_analysis.pyd`、`ritual_bundle.pyd`、`pe_diversifier.dll`、`upx.exe`）统一维护在 `backend/vendor/ritual/`，构建时由 `backend/neo_hosts.spec` 收集到发布包的 `backend/_internal/resources/binaries/ritual/`。无需将 `dist/` 中的同名副本重复提交；更新依赖时应更新 `backend/vendor/ritual/` 后重新构建。
 
 ## 许可与致谢
 

@@ -326,16 +326,11 @@ class _NeoServerSwitchState extends State<NeoServerSwitch> {
         content,
         if (dragging && canDrop)
           Positioned.fill(
-              child: IgnorePointer(
-                  child: Container(
+              child: EfDropHint(
+            'IMPORT PACKAGE',
+            '释放文件夹以导入替换包',
             key: const ValueKey('serverSwitch.drop-hint'),
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-                color: EfColors.of(context).panel.withValues(alpha: .96),
-                border: Border.all(color: EfColors.of(context).ink)),
-            child: const Center(
-                child: EfPair('IMPORT PACKAGE', '释放文件夹以导入替换包', size: 22)),
-          ))),
+          )),
       ]),
     );
   }

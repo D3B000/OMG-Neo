@@ -1,0 +1,270 @@
+{
+  "rootPolicy": "all backend/*.py, including lazy feature imports",
+  "totalModules": 30,
+  "reachableModules": [
+    "omg",
+    "omg.core",
+    "omg.core.alchemy",
+    "omg.core.build_env",
+    "omg.core.download",
+    "omg.core.gachabase",
+    "omg.core.gimi_signals",
+    "omg.core.gimi_update",
+    "omg.core.instance_ipc",
+    "omg.core.lanzou",
+    "omg.core.logging_setup",
+    "omg.core.mods_manager",
+    "omg.core.paths",
+    "omg.core.ritual_loader",
+    "omg.core.source_prep",
+    "omg.core.updates",
+    "omg.domain",
+    "omg.domain.inject",
+    "omg.domain.inject.dll_injector",
+    "omg.domain.inject.errors",
+    "omg.domain.inject.injection_probe",
+    "omg.domain.inject.launcher",
+    "omg.domain.inject.loader",
+    "omg.domain.inject.locale",
+    "omg.domain.inject.process_tracker",
+    "omg.domain.inject.process_waiter",
+    "omg.domain.launch",
+    "omg.domain.launch.controller",
+    "omg.domain.launch.types",
+    "omg.domain.launch.worker"
+  ],
+  "unusedFiles": [],
+  "dynamicCallsToReview": [
+    {
+      "file": "OMGLite\\src\\omg\\core\\ritual_loader.py",
+      "line": 63,
+      "call": "importlib.util.spec_from_file_location(_CYTHON_ANALYSIS_MOD, CYTHON_ANALYSIS_PYD, loader=loader)"
+    },
+    {
+      "file": "OMGLite\\src\\omg\\core\\ritual_loader.py",
+      "line": 98,
+      "call": "importlib.util.spec_from_file_location(_RITUAL_BUNDLE_MOD, RITUAL_BUNDLE_PYD, loader=loader)"
+    }
+  ],
+  "edges": {
+    "backend\\settings_store.py": [],
+    "backend\\server_versions.py": [],
+    "backend\\server_switch.py": [],
+    "backend\\server_import.py": [],
+    "backend\\server_backup.py": [],
+    "backend\\resource_service.py": [],
+    "backend\\resource_browser.py": [
+      "omg",
+      "omg.core",
+      "omg.core.mods_manager"
+    ],
+    "OMGLite\\src\\omg\\core\\mods_manager.py": [
+      "omg",
+      "omg.core",
+      "omg.core.gachabase",
+      "omg.core.paths"
+    ],
+    "OMGLite\\src\\omg\\core\\paths.py": [],
+    "OMGLite\\src\\omg\\core\\__init__.py": [],
+    "OMGLite\\src\\omg\\__init__.py": [],
+    "OMGLite\\src\\omg\\core\\gachabase.py": [
+      "omg",
+      "omg.core",
+      "omg.core.download",
+      "omg.core.paths"
+    ],
+    "OMGLite\\src\\omg\\core\\download.py": [],
+    "backend\\main.py": [
+      "omg",
+      "omg.core",
+      "omg.core.download",
+      "omg.core.gimi_update",
+      "omg.core.logging_setup",
+      "omg.core.updates",
+      "omg.domain",
+      "omg.domain.inject",
+      "omg.domain.inject.loader",
+      "omg.domain.inject.process_tracker"
+    ],
+    "OMGLite\\src\\omg\\domain\\inject\\process_tracker.py": [
+      "omg",
+      "omg.domain",
+      "omg.domain.inject",
+      "omg.domain.inject.process_waiter"
+    ],
+    "OMGLite\\src\\omg\\domain\\inject\\process_waiter.py": [
+      "omg",
+      "omg.domain",
+      "omg.domain.inject",
+      "omg.domain.inject.process_tracker"
+    ],
+    "OMGLite\\src\\omg\\domain\\inject\\__init__.py": [
+      "omg",
+      "omg.domain",
+      "omg.domain.inject",
+      "omg.domain.inject.dll_injector",
+      "omg.domain.inject.errors",
+      "omg.domain.inject.injection_probe",
+      "omg.domain.inject.launcher",
+      "omg.domain.inject.locale",
+      "omg.domain.inject.process_tracker"
+    ],
+    "OMGLite\\src\\omg\\domain\\__init__.py": [],
+    "OMGLite\\src\\omg\\domain\\inject\\injection_probe.py": [
+      "omg",
+      "omg.domain",
+      "omg.domain.inject",
+      "omg.domain.inject.process_tracker"
+    ],
+    "OMGLite\\src\\omg\\domain\\inject\\errors.py": [
+      "omg",
+      "omg.domain",
+      "omg.domain.inject",
+      "omg.domain.inject.locale"
+    ],
+    "OMGLite\\src\\omg\\domain\\inject\\locale.py": [],
+    "OMGLite\\src\\omg\\domain\\inject\\launcher.py": [
+      "omg",
+      "omg.domain",
+      "omg.domain.inject",
+      "omg.domain.inject.dll_injector",
+      "omg.domain.inject.errors",
+      "omg.domain.inject.locale",
+      "omg.domain.inject.process_tracker"
+    ],
+    "OMGLite\\src\\omg\\domain\\inject\\dll_injector.py": [
+      "omg",
+      "omg.domain",
+      "omg.domain.inject",
+      "omg.domain.inject.errors",
+      "omg.domain.inject.injection_probe",
+      "omg.domain.inject.locale",
+      "omg.domain.inject.process_tracker"
+    ],
+    "OMGLite\\src\\omg\\domain\\inject\\loader.py": [
+      "omg",
+      "omg.core",
+      "omg.core.paths"
+    ],
+    "OMGLite\\src\\omg\\core\\logging_setup.py": [
+      "omg",
+      "omg.core",
+      "omg.core.paths"
+    ],
+    "OMGLite\\src\\omg\\core\\updates.py": [
+      "omg",
+      "omg.core",
+      "omg.core.instance_ipc",
+      "omg.core.logging_setup",
+      "omg.core.paths"
+    ],
+    "OMGLite\\src\\omg\\core\\instance_ipc.py": [],
+    "OMGLite\\src\\omg\\core\\gimi_update.py": [
+      "omg",
+      "omg.core",
+      "omg.core.download",
+      "omg.core.gimi_signals",
+      "omg.core.logging_setup",
+      "omg.core.paths",
+      "omg.core.updates"
+    ],
+    "OMGLite\\src\\omg\\core\\gimi_signals.py": [],
+    "backend\\link_service.py": [],
+    "backend\\injector_main.py": [],
+    "backend\\injection_service.py": [
+      "omg",
+      "omg.domain",
+      "omg.domain.inject",
+      "omg.domain.inject.process_tracker"
+    ],
+    "backend\\injection_entry.py": [
+      "omg",
+      "omg.domain",
+      "omg.domain.launch",
+      "omg.domain.launch.controller",
+      "omg.domain.launch.worker"
+    ],
+    "OMGLite\\src\\omg\\domain\\launch\\controller.py": [
+      "omg",
+      "omg.core",
+      "omg.core.paths",
+      "omg.domain",
+      "omg.domain.inject",
+      "omg.domain.inject.launcher",
+      "omg.domain.inject.loader",
+      "omg.domain.inject.process_tracker",
+      "omg.domain.launch",
+      "omg.domain.launch.types",
+      "omg.domain.launch.worker"
+    ],
+    "OMGLite\\src\\omg\\domain\\launch\\types.py": [
+      "omg",
+      "omg.domain",
+      "omg.domain.inject",
+      "omg.domain.inject.launcher"
+    ],
+    "OMGLite\\src\\omg\\domain\\launch\\__init__.py": [
+      "omg",
+      "omg.domain",
+      "omg.domain.launch",
+      "omg.domain.launch.controller",
+      "omg.domain.launch.types",
+      "omg.domain.launch.worker"
+    ],
+    "OMGLite\\src\\omg\\domain\\launch\\worker.py": [
+      "omg",
+      "omg.domain",
+      "omg.domain.inject",
+      "omg.domain.inject.errors",
+      "omg.domain.inject.launcher",
+      "omg.domain.inject.loader",
+      "omg.domain.launch",
+      "omg.domain.launch.types"
+    ],
+    "backend\\file_io.py": [],
+    "backend\\cache_service.py": [],
+    "backend\\build_service.py": [
+      "omg",
+      "omg.core",
+      "omg.core.alchemy",
+      "omg.core.paths",
+      "omg.core.ritual_loader"
+    ],
+    "OMGLite\\src\\omg\\core\\ritual_loader.py": [
+      "omg",
+      "omg.core",
+      "omg.core.logging_setup",
+      "omg.core.paths"
+    ],
+    "OMGLite\\src\\omg\\core\\alchemy.py": [
+      "omg",
+      "omg.core",
+      "omg.core.build_env",
+      "omg.core.download",
+      "omg.core.gimi_update",
+      "omg.core.lanzou",
+      "omg.core.logging_setup",
+      "omg.core.paths",
+      "omg.core.ritual_loader",
+      "omg.core.source_prep",
+      "omg.core.updates"
+    ],
+    "OMGLite\\src\\omg\\core\\lanzou.py": [
+      "omg",
+      "omg.core",
+      "omg.core.logging_setup"
+    ],
+    "OMGLite\\src\\omg\\core\\source_prep.py": [],
+    "OMGLite\\src\\omg\\core\\build_env.py": [
+      "omg",
+      "omg.core",
+      "omg.core.ritual_loader",
+      "omg.core.source_prep"
+    ],
+    "backend\\backend_runtime.py": [
+      "omg",
+      "omg.core",
+      "omg.core.paths"
+    ]
+  }
+}

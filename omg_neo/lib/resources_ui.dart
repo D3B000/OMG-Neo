@@ -95,6 +95,7 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
       live?.ready == true && live?.busy == false && live?.closing == false;
   int epoch = -1;
   bool requested = false;
+  bool dragging = false;
   Timer? searchTimer;
   String? inlineError;
   String? loadedPath;
@@ -294,7 +295,36 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
               kind: active ? EfButtonKind.go : EfButtonKind.normal));
 
   @override
-  Widget build(BuildContext context) =>
+  Widget build(BuildContext context) {
+    final canDrop = available && (ModalRoute.of(context)?.isCurrent ?? true);
+    return DropTarget(
+        key: const ValueKey('resources.drop'),
+        enable: canDrop,
+        onDragEntered: (_) => setState(() => dragging = true),
+        onDragExited: (_) => setState(() => dragging = false),
+        onDragDone: (details) {
+          setState(() => dragging = false);
+          if (!canDrop || details.files.isEmpty) return;
+          rememberScroll();
+          live?.businessTask('resources.move', {
+            ...view,
+            'path': d.path.join('/'),
+            'sources': details.files.map((file) => file.path).toList(),
+          });
+        },
+        child: Stack(fit: StackFit.expand, children: [
+          page(),
+          if (dragging && canDrop)
+            const Positioned.fill(
+                child: EfDropHint(
+              'IMPORT RESOURCES',
+              '释放文件或文件夹以移入当前目录',
+              key: ValueKey('resources.drop-hint'),
+            )),
+        ]));
+  }
+
+  Widget page() =>
       Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         widget.region(
             'resources.header',
@@ -493,22 +523,7 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
                                 style: EfType.ui(11, color: c.ink2))),
                         Text('查看详情', style: EfType.ui(11, color: c.ink2)),
                       ])))),
-        Expanded(
-            child: widget.region(
-                'resources.cards',
-                DropTarget(
-                    enable: available &&
-                        (ModalRoute.of(context)?.isCurrent ?? true),
-                    onDragDone: (details) {
-                      rememberScroll();
-                      live?.businessTask('resources.move', {
-                        ...view,
-                        'path': d.path.join('/'),
-                        'sources':
-                            details.files.map((file) => file.path).toList(),
-                      });
-                    },
-                    child: folderView()))),
+        Expanded(child: widget.region('resources.cards', folderView())),
       ]);
 
   Widget folderView() {

@@ -1,0 +1,13 @@
+{
+  "sourceClosureUnchanged": true,
+  "deletedModulesInFrozenGraph": [],
+  "frozenInjectorExit": 0,
+  "frozenInjectorPreflightResult": {
+    "token": "lite-cleanup",
+    "ok": false,
+    "message": "\u672a\u914d\u7f6e\u6e38\u620f\u76ee\u5f55\uff08game_folder \u4e3a\u7a7a\uff09",
+    "verification": "not_checked"
+  },
+  "serviceModuleCount": 337,
+  "injectorModuleCount": 187
+}
