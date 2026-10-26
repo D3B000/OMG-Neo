@@ -25,3 +25,4 @@ omg_neo/design-reviews/
 omg_neo/shots/
 # Obsolete generated spec with machine-specific absolute paths
 backend/omg_backend.spec
+updater/validation/

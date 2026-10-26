@@ -1,47 +1,8 @@
-"""
-GitHub 资源智能下载模块
+"""GitHub resources: actual requests, staggered fallback and per-network route cache.
 
-针对 GIMI-PACKAGE 和 XXMI-Libs-Package 下载场景优化,
-参考 cit (https://gitee.com/solider245/cit) 的「多代理 URL 转换 + 智能下载」
-思路并集成到本模块中。
-
-cit 功能对照:
-  - change (URL→代理地址)        → build_download_candidates() 已实现
-  - get    (智能下载 release/raw) → download_file_smart() 已实现
-                                    (当前场景固定 release/source zip,无需 raw 判定)
-  - clone  (git clone 加速)       → 不复刻 (当前只需下载 zip,不 clone 仓库)
-  - sub    (submodule 加速)       → 不复刻 (同上)
-  - 常用软件/系统加速              → 不复刻 (与 GIMI/XXMI 下载无关)
-
-核心能力:
-- 网络环境智能识别 (能访问 YouTube → 直连 GitHub,跳过代理)
-- 多公共代理自动 failover (8 个代理按优先级排序,参考社区实测列表)
-- HTTP Range 断点续传 (网络中断后从已下载位置继续,不重新开始)
-- 智能重试 + 指数退避 (单 URL 多次重试,失败自动切换下一代理)
-- SSL 双重回退 (默认验证 → 不验证)
-- 可选代理测速 (select_fastest_proxy,选当前最快代理)
-- 兼容现有 DownloadSignals 进度/状态回调
-
-代理启用决策 (should_use_proxy):
-  - 非 GitHub URL → 不使用代理
-  - YouTube 可访问 → 不使用代理 (用户已具备科学上网能力,直连更快)
-  - YouTube 不可访问 → 使用代理 (启用多代理 failover)
-  探测结果缓存 5 分钟,避免每次下载都消耗探测时间。
-
-传输通道 (get_openers):
-  「加不加第三方代理前缀」之外还有一层更底的问题: urllib 在 Windows 上会
-  自动读取注册表里的系统代理 (如 Clash 的 127.0.0.1:7892), 因此平时直接调
-  urlopen() 走的其实一直是系统代理, 并非真正的直连。当代理客户端对某个域名
-  (实测: api.github.com) 的 CONNECT 隧道不稳定时, 会抛
-  ``SSL: UNEXPECTED_EOF_WHILE_READING``, 而此时绕过系统代理的直连往往是通的。
-  故每个请求都在「系统代理 / 直连」两种通道上各试一次, 顺序按网络环境自适应。
-
-场景说明:
-- GIMI-PACKAGE 和 XXMI-Libs-Package 均为 GitHub release/source zip 下载,
-  非 pip 安装,因此 PyPI 国内镜像不适用 (仅作预留接口保留)。
-- 外部加速工具需用户单独安装,不在此集成,避免引入额外运行时依赖。
-
-迁移说明: 原 OMGDev/func/download.py,现作为 omg.core.download 纳入标准包。
+Original URLs (following the system proxy), explicit direct connections and public
+mirror URLs compete using real GET requests. Only the winning download writes to
+disk. TLS certificates are verified on all automatically selected routes.
 """
 
 import os
@@ -51,6 +12,10 @@ import time
 import errno
 import socket
 import logging
+import threading
+import queue
+import re
+from urllib.parse import urlsplit
 import urllib.request
 import urllib.error
 from typing import Optional, Tuple, List
@@ -102,9 +67,7 @@ DEFAULT_TIMEOUT = 30              # 连接/读取超时 (秒)
 DEFAULT_CHUNK_SIZE = 524288       # 512KB
 MAX_RETRIES_PER_URL = 2           # 每个 URL 最多重试次数 (不含首次尝试)
 RETRY_BACKOFF_BASE = 1.5          # 指数退避基数 (秒)
-RESUME_PROBE_TIMEOUT = 8          # 探测 Range 支持的超时
 
-MAX_TOTAL_TRIES = 8              # 单 URL 最大尝试次数 (通道数 × 重试轮次 的上限)
 
 #: GitHub 限流时返回的状态码。403 在 GitHub 上既可能是限流也可能是普通拒绝，
 #: 需结合 ``X-RateLimit-Remaining: 0`` 判定（见 :func:`is_rate_limited`）。
@@ -170,16 +133,12 @@ class RateLimitedError(RuntimeError):
     :func:`fetch_json_api_smart` 遇到限流会抛本异常而非返回 None。
     """
 
-# YouTube 可达性探测配置
-# 逻辑: 能访问 YouTube → 用户已具备科学上网能力 → 直连 GitHub 通常更快,跳过代理
-#       不能访问 YouTube → 启用多代理 failover
-YOUTUBE_PROBE_URL = "https://www.youtube.com"
-YOUTUBE_PROBE_TIMEOUT = 4         # 探测超时 (秒)
-YOUTUBE_CACHE_TTL = 300           # 探测结果缓存时间 (秒),避免每次下载都探测
-
-# 全局缓存: YouTube 可达性 (None=未探测, True/False=已探测)
-_youtube_reachable_cache: Optional[bool] = None
-_youtube_cache_time: float = 0.0
+# Start another actual request after this delay; never block on a probe.
+FALLBACK_DELAY = 0.8
+MAX_ROUTE_WORKERS = 3
+ROUTE_CACHE_TTL = 300.0
+_route_cache = {}
+_route_lock = threading.Lock()
 
 
 # ============================================================
@@ -227,27 +186,10 @@ _openers_cache: dict = {}
 
 
 def get_openers(prefer_direct: bool = False) -> List[Tuple[str, urllib.request.OpenerDirector]]:
-    """返回按优先级排列的传输通道: ``[(通道名, opener), ...]``。
+    """Verified TLS routes: system proxy first, explicit direct access as fallback.
 
-    urllib 在 Windows 上会自动读取注册表中的系统代理, 所以裸 ``urlopen()``
-    并不是真正的直连。要拿到真正的直连必须显式传 ``ProxyHandler({})``。
-    本函数把两种通道都造出来, 让调用方在「代理客户端对某域名抽风」时还有
-    一条活路 —— 实测 api.github.com 被系统代理重置时, 直连通道是可以通的。
-
-    每个通道内部再叠一层 SSL 双重回退 (验证证书 → 不验证), 共 4 个组合:
-
-        prefer_direct=False  →  系统代理/SSL → 系统代理/SSL-不验证 → 直连/... → 直连/...
-        prefer_direct=True   →  直连/SSL → 直连/SSL-不验证 → 系统代理/... → 系统代理/...
-
-    系统未配置代理时「直连」与「系统代理」是同一条路, 此时只返回 2 个组合,
-    避免重复请求。
-
-    Args:
-        prefer_direct: True 时把直连排在前 (能直连的场景更快且更稳)。
-
-    Returns:
-        通道列表, 每个元素为 (可读通道名, opener)。opener 已绑定 SSL 上下文,
-        调用时用 ``opener.open(req, timeout=...)``。
+    urllib follows Windows/environment proxy settings by default. ProxyHandler({})
+    explicitly bypasses those settings. Contexts/openers are cached by snapshot.
     """
     key = (tuple(sorted(get_system_proxies().items())), prefer_direct)
     cached = _openers_cache.get(key)
@@ -263,16 +205,11 @@ def get_openers(prefer_direct: bool = False) -> List[Tuple[str, urllib.request.O
         channels.reverse()
 
     openers: List[Tuple[str, urllib.request.OpenerDirector]] = []
+    ctx = _ssl_ctx()
     for chan_name, proxy_map in channels:
-        for ssl_name, ctx in (("SSL", _ssl_ctx()), ("SSL-不验证", _ssl_ctx_noverify())):
-            handler = (urllib.request.ProxyHandler() if proxy_map is None
-                       else urllib.request.ProxyHandler(proxy_map))
-            # 传入自建 HTTPSHandler 会顶掉 build_opener 的默认 HTTPSHandler,
-            # 从而让 SSL 上下文生效。
-            opener = urllib.request.build_opener(
-                handler, urllib.request.HTTPSHandler(context=ctx)
-            )
-            openers.append((f"{chan_name}/{ssl_name}", opener))
+        handler = urllib.request.ProxyHandler(dict(key[0]) if proxy_map is None else proxy_map)
+        opener = urllib.request.build_opener(handler, urllib.request.HTTPSHandler(context=ctx))
+        openers.append((f"{chan_name}/SSL", opener))
 
     _openers_cache[key] = openers
     return openers
@@ -283,86 +220,21 @@ def reset_openers_cache() -> None:
     _openers_cache.clear()
 
 
-# ============================================================
-# 网络环境探测: YouTube 可达性
-# ============================================================
-
-def is_youtube_reachable(timeout: float = YOUTUBE_PROBE_TIMEOUT,
-                         force_refresh: bool = False) -> bool:
-    """探测 YouTube 是否可访问
-
-    用于判断用户网络环境是否已具备科学上网能力:
-      - YouTube 可访问 → 直连 GitHub 通常更快,跳过代理
-      - YouTube 不可访问 → 启用多代理 failover
-
-    结果缓存 YOUTUBE_CACHE_TTL 秒,避免每次下载都消耗探测时间。
-
-    Args:
-        timeout: 探测超时 (秒)
-        force_refresh: 强制刷新缓存,忽略 TTL
-
-    Returns:
-        True=可访问, False=不可访问
-    """
-    global _youtube_reachable_cache, _youtube_cache_time
-
-    now = time.time()
-    if (not force_refresh
-            and _youtube_reachable_cache is not None
-            and now - _youtube_cache_time < YOUTUBE_CACHE_TTL):
-        return _youtube_reachable_cache
-
-    # 实际探测 YouTube (HEAD 请求,减少流量)
-    reachable = False
-    for ctx in [_ssl_ctx(), _ssl_ctx_noverify()]:
-        try:
-            req = urllib.request.Request(
-                YOUTUBE_PROBE_URL,
-                method="HEAD",
-                headers={"User-Agent": DEFAULT_UA},
-            )
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-                if resp.status < 400:
-                    reachable = True
-                    break
-        except Exception:
-            continue
-
-    _youtube_reachable_cache = reachable
-    _youtube_cache_time = now
-    logger.info(f"YouTube 可达性探测: {reachable} (缓存 {YOUTUBE_CACHE_TTL}s)")
-    return reachable
-
-
-def reset_youtube_cache() -> None:
-    """重置网络环境缓存
-
-    用户切换 VPN/代理后可调用, 使下次请求重新探测网络环境。
-    同时清空传输通道缓存 (系统代理配置可能已变化)。
-    """
-    global _youtube_reachable_cache, _youtube_cache_time
-    _youtube_reachable_cache = None
-    _youtube_cache_time = 0.0
+def reset_route_cache() -> None:
+    """Forget successful routes after a VPN/network change."""
+    with _route_lock:
+        _route_cache.clear()
     reset_openers_cache()
 
 
+def reset_youtube_cache() -> None:
+    """Compatibility alias; no YouTube requests are made."""
+    reset_route_cache()
+
+
 def should_use_proxy(url: str = "") -> bool:
-    """根据网络环境智能判断是否需要使用代理
-
-    决策规则:
-      1. 非 GitHub URL → 不使用代理 (代理仅对 GitHub URL 生效)
-      2. YouTube 可访问 → 不使用代理 (用户已具备科学上网能力)
-      3. YouTube 不可访问 → 使用代理 (启用多代理 failover)
-
-    Args:
-        url: 待下载的 URL,用于判断是否为 GitHub 域名
-
-    Returns:
-        True=使用代理, False=直连
-    """
-    if url and not is_github_url(url):
-        return False
-    return not is_youtube_reachable()
+    """Compatibility: GitHub URLs are eligible for mirror fallback, without I/O."""
+    return not url or is_github_url(url)
 
 
 # ============================================================
@@ -371,7 +243,11 @@ def should_use_proxy(url: str = "") -> bool:
 
 def is_github_url(url: str) -> bool:
     """判断是否为 GitHub 域名 URL"""
-    return "github.com" in url or "api.github.com" in url
+    return (urlsplit(url).hostname or "").lower() in {
+        "github.com", "api.github.com", "raw.githubusercontent.com",
+        "codeload.github.com", "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+    }
 
 
 def build_proxy_urls(original_url: str,
@@ -397,14 +273,11 @@ def build_proxy_urls(original_url: str,
 
 
 def build_download_candidates(original_url: str) -> List[str]:
-    """为下载构建候选 URL 列表: 代理在前,原 URL 在后
+    """为下载构建候选 URL 列表: 原 URL 在前,代理作为回退
 
     智能 failover: 按优先级尝试,失败自动切换下一个。
     """
-    candidates = build_proxy_urls(original_url)
-    if original_url not in candidates:
-        candidates.append(original_url)
-    return candidates
+    return [original_url] + build_proxy_urls(original_url)
 
 
 # ============================================================
@@ -463,216 +336,176 @@ def select_fastest_proxy(test_url: str,
 
 
 # ============================================================
-# 断点续传探测
+# Shared actual-request routing
 # ============================================================
 
-def _supports_resume(url: str, ua: str = DEFAULT_UA,
-                    timeout: float = RESUME_PROBE_TIMEOUT) -> bool:
-    """检测目标 URL 是否支持 Range 请求 (断点续传)
 
-    通过发送 Range: bytes=0-0 探测:
-    - 206 Partial Content → 支持
-    - 200 OK → 不支持 (服务器忽略了 Range)
+class _Cancelled(Exception):
+    pass
+
+
+def _cache_key(url, use_proxies):
+    host = (urlsplit(url).hostname or "").lower()
+    kind = ("api" if host == "api.github.com" else
+            "raw" if host == "raw.githubusercontent.com" else
+            "release" if "/releases/download/" in url or host in {
+                "objects.githubusercontent.com", "release-assets.githubusercontent.com"}
+            else "content")
+    return host, kind, bool(use_proxies), tuple(sorted(get_system_proxies().items()))
+
+
+def _routes(url, use_proxies):
+    channels = get_openers()
+    prefixes = GITHUB_PROXIES if use_proxies and is_github_url(url) else []
+    routes = [("", channels[0][0], channels[0][1])]
+    routes += [(prefix.rstrip("/") + "/", channels[0][0], channels[0][1])
+               for prefix in prefixes]
+    # Try explicit direct access alongside the first mirror when a system proxy exists.
+    if len(channels) > 1:
+        routes.insert(2, ("", channels[1][0], channels[1][1]))
+        routes += [(prefix.rstrip("/") + "/", channels[1][0], channels[1][1])
+                   for prefix in prefixes]
+    key = _cache_key(url, use_proxies)
+    with _route_lock:
+        cached = _route_cache.get(key)
+        if cached and time.monotonic() - cached[1] < ROUTE_CACHE_TTL:
+            routes.sort(key=lambda route: route[:2] != cached[0])
+        else:
+            _route_cache.pop(key, None)
+    return key, routes
+
+
+def _remember(key, route):
+    with _route_lock:
+        _route_cache[key] = (route[:2], time.monotonic())
+
+
+def _forget(key, route):
+    with _route_lock:
+        cached = _route_cache.get(key)
+        if cached and cached[0] == route[:2]:
+            _route_cache.pop(key, None)
+
+
+def _race(url, routes, operation, key, should_cancel=None, status_cb=None,
+          cleanup=lambda value: None):
+    """Bounded daemon workers; losers never write files or publish callbacks.
+
+    urllib cannot interrupt DNS/connect in another thread. Late responses are
+    closed by their worker, without delaying the winner or cancellation.
     """
-    req = urllib.request.Request(
-        url, headers={"User-Agent": ua, "Range": "bytes=0-0"}
-    )
-    for ctx in [_ssl_ctx(), _ssl_ctx_noverify()]:
+    results = queue.Queue()
+    gate = threading.Lock()
+    stopped = False
+    active = 0
+    index = 0
+    next_start = 0.0
+    last_error = RuntimeError("没有可用下载通道")
+
+    def worker(route):
         try:
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-                return resp.status == 206
-        except Exception:
-            continue
-    return False
+            value, error = operation(route), None
+        except Exception as exc:
+            value, error = None, exc
+        with gate:
+            if stopped:
+                if error is None:
+                    cleanup(value)
+            else:
+                results.put((route, value, error))
 
-
-# ============================================================
-# 核心下载: 单 URL + 断点续传 + 智能重试
-# ============================================================
-
-def _download_single_url(url: str, dest_path: str, signals=None,
-                        progress_range: Tuple[int, int] = (0, 100),
-                        timeout: int = DEFAULT_TIMEOUT,
-                        chunk_size: int = DEFAULT_CHUNK_SIZE,
-                        max_retries: int = MAX_RETRIES_PER_URL,
-                        should_cancel=None,
-                        openers=None
-                        ) -> Tuple[bool, str]:
-    """单 URL 下载: 断点续传 + 智能重试 + 多通道回退
-
-    Args:
-        openers: 传输通道列表, 见 get_openers()。None 时按默认顺序自动获取。
-
-    Returns:
-        (success, error_msg)
-    """
-    ua = DEFAULT_UA
-    last_err = ""
-    if openers is None:
-        openers = get_openers()
-
-    # 尝试编排: 通道 × 重试, 展平成单层循环。
-    # 同一轮内切换通道不等待 (失败通常是立刻返回), 走完一轮仍失败才指数退避,
-    # 避免「通道数 × 重试数」把等待时间成倍放大。
-    rounds = max_retries + 1
-    total_tries = min(len(openers) * rounds, MAX_TOTAL_TRIES)
-
-    for try_idx in range(total_tries):
-        chan_name, opener = openers[try_idx % len(openers)]
-
-        # 第 2 轮起, 每轮开始前退避一次
-        if try_idx and try_idx % len(openers) == 0:
-            wait = RETRY_BACKOFF_BASE ** (try_idx // len(openers))
-            logger.info(f"等待 {wait:.1f}s 后重试 ({url})...")
-            time.sleep(wait)
-
-        # 已下载字节数 (用于断点续传)
-        existing_size = 0
-        if os.path.exists(dest_path):
+    try:
+        while index < len(routes) or active:
+            if should_cancel and should_cancel():
+                raise _Cancelled()
+            now = time.monotonic()
+            if index < len(routes) and active < MAX_ROUTE_WORKERS and (
+                    active == 0 or now >= next_start):
+                route = routes[index]
+                if status_cb:
+                    try:
+                        label = (urlsplit(route[0]).netloc if route[0] else
+                                 urlsplit(url).netloc) + " · " + route[1]
+                        status_cb(label, index, len(routes))
+                    except Exception:
+                        pass
+                threading.Thread(target=worker, args=(route,), daemon=True).start()
+                index += 1
+                active += 1
+                next_start = time.monotonic() + FALLBACK_DELAY
             try:
-                existing_size = os.path.getsize(dest_path)
-            except OSError:
-                existing_size = 0
+                route, value, error = results.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            active -= 1
+            if error is None:
+                return value, route
+            _forget(key, route)
+            if isinstance(error, RateLimitedError):
+                raise error
+            last_error = error
+            logger.debug("请求通道失败 (%s · %s): %s", route[0] or "原始地址", route[1], error)
+            next_start = 0.0
+        raise last_error
+    finally:
+        with gate:
+            stopped = True
+            while not results.empty():
+                _, value, error = results.get_nowait()
+                if error is None:
+                    cleanup(value)
 
-        # 构造请求头
-        headers = {"User-Agent": ua}
-        if existing_size > 0:
-            # 仅当支持 Range 时才追加续传头
-            # 注意: _supports_resume 内部已有 SSL 双重回退
-            if _supports_resume(url, ua=ua, timeout=min(timeout, RESUME_PROBE_TIMEOUT)):
-                headers["Range"] = f"bytes={existing_size}-"
-                logger.info(f"断点续传: 从 {existing_size} 字节继续 ({url})")
-            else:
-                # 不支持 Range,清空已下载部分重新开始
-                try:
-                    os.remove(dest_path)
-                except OSError:
-                    pass
-                existing_size = 0
 
-        # 传输通道回退: (系统代理 / 直连) × (SSL 验证 / 不验证)
-        # 每个 opener 自带 SSL 上下文, 故逐级切换即可覆盖原来的双重回退,
-        # 并额外获得「代理客户端抽风时改走直连」的能力。
+def _open(route, url, headers, timeout):
+    req = urllib.request.Request(route[0] + url, headers=headers)
+    try:
+        return route[2].open(req, timeout=timeout)
+    except urllib.error.HTTPError as error:
         try:
-            req = urllib.request.Request(url, headers=headers)
-            with opener.open(req, timeout=timeout) as resp:
-                status = resp.status
-                if status == 206:
-                    # 断点续传成功: 追加写入
-                    mode = "ab"
-                    content_range = resp.headers.get("Content-Range", "")
-                    if content_range:
-                        try:
-                            total_size = int(content_range.split("/")[-1])
-                        except (IndexError, ValueError):
-                            total_size = 0
-                    else:
-                        total_size = 0
-                elif status == 200:
-                    # 全新下载: 覆盖写入
-                    mode = "wb"
-                    existing_size = 0
-                    total_size = int(resp.headers.get("Content-Length", 0) or 0)
-                elif status == 416:
-                    # Range Not Satisfiable: 文件可能已完整下载
-                    if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
-                        logger.info(f"文件已完整下载 (416): {dest_path}")
-                        return True, ""
-                    # 否则按全新下载处理
-                    mode = "wb"
-                    existing_size = 0
-                    total_size = 0
-                else:
-                    return False, f"HTTP {status}"
+            if is_rate_limited(error):
+                raise RateLimitedError(rate_limit_hint(error)) from error
+            raise
+        finally:
+            error.close()
 
-                downloaded = existing_size
-                p_lo, p_hi = progress_range
 
-                with open(dest_path, mode) as f:
-                    while True:
-                        try:
-                            chunk = resp.read(chunk_size)
-                        except socket.timeout:
-                            # 读超时: 保存已下载部分,下次重试续传
-                            logger.warning(
-                                f"读取超时,已保存 {downloaded} 字节: {url}"
-                            )
-                            break
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if should_cancel is not None and should_cancel():
-                            logger.info("下载被用户取消: %s", url)
-                            return False, "已取消"
-                        if signals and total_size > 0:
-                            pct = downloaded / total_size * (p_hi - p_lo) + p_lo
-                            try:
-                                signals.progress.emit(float(pct))
-                            except Exception:
-                                pass
-                            mb_d = downloaded / 1048576
-                            mb_t = total_size / 1048576
-                            try:
-                                signals.status.emit(
-                                    f"下载中... {mb_d:.1f} / {mb_t:.1f} MB",
-                                    "info",
-                                )
-                            except Exception:
-                                pass
+def _fetch(url, timeout, use_proxies, status_cb, headers, should_cancel, as_json):
+    key, routes = _routes(url, use_proxies)
 
-                # 检查是否下载完成
-                if total_size > 0 and downloaded < total_size:
-                    last_err = "下载未完成 (中断)"
-                    continue  # 通道未下载完,切换下一通道重试 (Range 续传)
-                return True, ""
+    def operation(route):
+        with _open(route, url, headers, timeout) as response:
+            if response.status != 200:
+                raise ValueError(f"HTTP {response.status}")
+            content = response.read().decode("utf-8")
+            return json.loads(content) if as_json else content
 
-        except ssl.SSLError as e:
-            # 换下一个通道 (可能是系统代理的 CONNECT 隧道被重置, 直连反而通)
-            last_err = f"SSL 连接失败: {e}"
-            logger.warning(f"SSL 错误 ({chan_name}), 切换通道: {e}")
-            continue
-        except urllib.error.HTTPError as e:
-            if e.code == 416:
-                # 在异常分支处理 416 (有些代理会以异常形式返回)
-                if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
-                    logger.info(f"文件已完整下载 (416 异常): {dest_path}")
-                    return True, ""
-                last_err = f"HTTP {e.code}: {e.reason}"
-            elif is_rate_limited(e):
-                # 限流：换通道 / 换代理前缀也没用（限流按 IP 计），立刻放弃并
-                # 给出可执行提示，否则会白跑完所有通道再报「网络错误」。
-                hint = rate_limit_hint(e)
-                logger.warning(f"GitHub 限流，停止重试: {hint}")
-                return False, hint
-            elif 400 <= e.code < 500:
-                # 客户端错误 (非限流),不重试,直接返回
-                return False, f"HTTP {e.code}: {e.reason}"
-            else:
-                last_err = f"HTTP {e.code}: {e.reason}"
-            continue  # HTTP 错误,切换下一通道重试
-        except OSError as e:
-            # 磁盘满 / 无权限等**本地**故障：换通道重试毫无意义，且旧实现把它
-            # 归到「网络错误」，文案完全指错方向。这里单独识别并立即返回。
-            if getattr(e, "errno", None) == errno.ENOSPC:
-                logger.error("磁盘空间不足，终止下载")
-                return False, "磁盘空间不足，请清理后重试"
-            if getattr(e, "errno", None) == errno.EACCES:
-                logger.error("目标文件无写入权限，终止下载")
-                return False, f"无写入权限: {dest_path}"
-            last_err = f"网络错误: {e}"
-            logger.warning(f"下载尝试 {try_idx + 1} 失败 ({url}): {e}")
-            continue  # 网络错误,切换下一通道重试
-        except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
-            last_err = f"网络错误: {e}"
-            logger.warning(f"下载尝试 {try_idx + 1} 失败 ({url}): {e}")
-            continue  # 网络错误,切换下一通道重试
-        except Exception as e:
-            last_err = f"下载失败: {e}"
-            logger.warning(f"下载尝试 {try_idx + 1} 失败 ({url}): {e}")
-            continue
+    try:
+        value, route = _race(url, routes, operation, key, should_cancel, status_cb)
+        _remember(key, route)
+        return value
+    except RateLimitedError:
+        raise
+    except _Cancelled:
+        return None
+    except Exception as error:
+        logger.warning("请求失败 (%s): %s", url, error)
+        return None
 
-    return False, last_err
+
+def fetch_url_smart(url: str, timeout: int = 15, use_proxies: bool = True,
+                    status_cb=None, headers: Optional[dict] = None,
+                    should_cancel=None) -> Optional[str]:
+    request_headers = {"User-Agent": DEFAULT_UA,
+                       "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}
+    request_headers.update(headers or {})
+    return _fetch(url, timeout, use_proxies, status_cb, request_headers, should_cancel, False)
+
+
+def fetch_json_api_smart(url: str, timeout: int = 15, use_proxies: bool = True,
+                        status_cb=None, should_cancel=None) -> Optional[dict]:
+    return _fetch(url, timeout, use_proxies, status_cb,
+                  {"User-Agent": "OMG-GIMI-Manager/1.0",
+                   "Accept": "application/vnd.github+json"}, should_cancel, True)
 
 
 def download_file_smart(url: str, dest_path: str, signals=None,
@@ -681,214 +514,118 @@ def download_file_smart(url: str, dest_path: str, signals=None,
                         chunk_size: int = DEFAULT_CHUNK_SIZE,
                         use_proxies: bool = True,
                         should_cancel=None) -> Tuple[bool, str]:
-    """智能下载: 多代理 failover + 断点续传 + 智能重试
+    """Race response headers/first bytes, then stream on the caller only.
 
-    Args:
-        url: 原始下载 URL
-        dest_path: 目标保存路径
-        signals: DownloadSignals 对象 (可选,提供 progress/status 信号)
-        progress_range: 进度范围 (与原 _download_file 兼容)
-        timeout: 超时秒数
-        chunk_size: 块大小
-        use_proxies: 是否使用代理 (True 时为 GitHub URL 自动构建代理候选)
-
-    Returns:
-        (success, error_msg)
+    Range is sent on the actual GET, without a separate resume probe. A server
+    ignoring Range causes a safe overwrite; malformed ranges never get appended.
     """
-    # 构建候选 URL 列表
-    if use_proxies and is_github_url(url) and should_use_proxy(url):
-        candidates = build_download_candidates(url)
-    else:
-        candidates = [url]
-        if use_proxies and is_github_url(url):
-            logger.info("YouTube 可访问,直连 GitHub (跳过代理)")
-
-    logger.info(f"下载候选 URL (共 {len(candidates)} 个): {candidates}")
-
-    # 与候选 URL 构造逻辑保持一致: 仅当走代理前缀时才优先系统代理通道
-    prefer_direct = (candidates == [url])
-
-    last_err = ""
-    for i, candidate_url in enumerate(candidates):
-        if i > 0:
-            logger.info(f"切换至下一个候选 URL: {candidate_url}")
+    key, all_routes = _routes(url, use_proxies)
+    last_error = "下载失败"
+    for round_index in range(MAX_RETRIES_PER_URL + 1):
+        routes = list(all_routes)
+        while routes:
+            if should_cancel and should_cancel():
+                return False, "已取消"
+            response = None
+            route = None
             try:
-                if signals and hasattr(signals, "status") and signals.status:
-                    signals.status.emit("切换下载源重试中...", "info")
-            except Exception:
-                pass
-        ok, err = _download_single_url(
-            candidate_url, dest_path, signals=signals,
-            progress_range=progress_range, timeout=timeout,
-            chunk_size=chunk_size, max_retries=MAX_RETRIES_PER_URL,
-            should_cancel=should_cancel,
-            openers=get_openers(prefer_direct=prefer_direct),
-        )
-        if ok:
-            return True, ""
-        if err == "已取消":
-            # 用户取消：立即终止所有候选源重试
-            return False, "已取消"
-        last_err = err
+                offset = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+                headers = {"User-Agent": DEFAULT_UA, "Accept-Encoding": "identity"}
+                if offset:
+                    headers["Range"] = f"bytes={offset}-"
 
-    # 所有候选都失败: 清理损坏的部分文件
-    if os.path.exists(dest_path):
-        try:
-            if os.path.getsize(dest_path) < 1024:
-                # <1KB 视为空文件,删除
-                os.remove(dest_path)
-        except OSError:
-            pass
+                def operation(candidate, headers=headers, offset=offset):
+                    try:
+                        resp = _open(candidate, url, headers, timeout)
+                    except urllib.error.HTTPError as error:
+                        # Accept 416 only when the server confirms the exact local length.
+                        if (error.code == 416 and offset > 0 and
+                                error.headers.get("Content-Range") == f"bytes */{offset}"):
+                            return None, b"", offset
+                        raise
+                    try:
+                        if resp.status not in (200, 206):
+                            raise ValueError(f"HTTP {resp.status}")
+                        total = int(resp.headers.get("Content-Length", 0) or 0)
+                        if resp.status == 206:
+                            match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)",
+                                                 resp.headers.get("Content-Range", ""))
+                            if not match or int(match[1]) != offset:
+                                raise ValueError("服务器返回了不匹配的续传范围")
+                            start, end, size = map(int, match.groups())
+                            if not start <= end < size or end != size - 1:
+                                raise ValueError("服务器返回了无效的续传范围")
+                            if total and total != end - start + 1:
+                                raise ValueError("续传长度与响应范围不一致")
+                            total = size
+                        content_type = resp.headers.get("Content-Type", "").lower()
+                        if is_github_url(url) and "text/html" in content_type:
+                            raise ValueError("下载通道返回了 HTML 页面")
+                        # read1 avoids waiting for a whole 512KB buffer before choosing.
+                        first = getattr(resp, "read1", resp.read)(min(chunk_size, 8192))
+                        if not first and total:
+                            raise ValueError("下载响应为空")
+                        return resp, first, total
+                    except Exception:
+                        resp.close()
+                        raise
 
-    return False, last_err
+                def status(label, index, total):
+                    if signals:
+                        signals.status.emit(f"连接下载源：{label}", "info")
 
-
-# ============================================================
-# 兼容现有 API: fetch_url / fetch_json_api
-# ============================================================
-
-def _extract_proxy_label(candidate_url: str, original_url: str) -> str:
-    """从候选 URL 中提取代理名称用于 UI 展示。
-
-    例: "https://gh-proxy.com/https://github.com/..." → "gh-proxy.com"
-         "https://github.com/..." (原 URL) → "github.com 直连"
-    """
-    if candidate_url == original_url:
-        return "github.com 直连"
-    # 代理前缀是 candidate_url 去掉尾部的 original_url
-    if candidate_url.endswith(original_url):
-        prefix = candidate_url[:-len(original_url)]
-        # 去掉 scheme 和尾随斜杠
-        prefix = prefix.replace("https://", "").replace("http://", "").rstrip("/")
-        if prefix:
-            return prefix
-    # fallback: 提取第一个 host
-    try:
-        from urllib.parse import urlparse
-        p = urlparse(candidate_url)
-        return p.netloc or "代理"
-    except Exception:
-        return "代理"
-
-
-def fetch_url_smart(url: str, timeout: int = 15,
-                    use_proxies: bool = True,
-                    status_cb=None,
-                    headers: Optional[dict] = None,
-                    should_cancel=None) -> Optional[str]:
-    """获取 URL 内容,返回解码文本。支持多代理 failover + SSL 回退
-
-    替代 main.py 中的 _fetch_url 函数。
-
-    Args:
-        url: 目标 URL
-        timeout: 超时秒数
-        use_proxies: 是否启用多代理 failover
-        status_cb: 可选回调 fn(proxy_label: str, attempt_idx: int, total: int)
-                   每次切换到新的候选 URL 时调用,用于 UI 反馈
-        headers: 可选额外请求头,会合并进 browser_headers(可覆盖 UA/Accept 等)。
-                 例:{"Accept-Language": "ko-KR,ko;q=0.9"} 强制服务端按语言本地化。
-    """
-    browser_headers = {
-        "User-Agent": DEFAULT_UA,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-    if headers:
-        browser_headers.update(headers)
-
-    if use_proxies and is_github_url(url) and should_use_proxy(url):
-        candidates = build_download_candidates(url)
-        prefer_direct = False
-    else:
-        candidates = [url]
-        prefer_direct = True
-        if use_proxies and is_github_url(url):
-            logger.info("YouTube 可访问,直连 GitHub (跳过代理前缀)")
-
-    total = len(candidates)
-    openers = get_openers(prefer_direct=prefer_direct)
-    for i, candidate_url in enumerate(candidates):
-        label = _extract_proxy_label(candidate_url, url)
-        if status_cb:
-            try:
-                status_cb(label, i, total)
-            except Exception:
-                pass
-        if should_cancel and should_cancel():
-            logger.info("fetch_url_smart 已被取消，提前返回")
-            return None
-        for chan_name, opener in openers:
-            try:
-                req = urllib.request.Request(candidate_url, headers=browser_headers)
-                with opener.open(req, timeout=timeout) as resp:
-                    return resp.read().decode("utf-8")
-            except Exception as e:
-                logger.warning(f"请求失败 ({candidate_url} · {chan_name}): {e}")
-                continue
-
-    return None
-
-
-def fetch_json_api_smart(url: str, timeout: int = 15,
-                        use_proxies: bool = True,
-                        status_cb=None,
-                        should_cancel=None) -> Optional[dict]:
-    """获取 JSON API。支持多代理 failover + SSL 回退
-
-    替代 main.py 中的 _fetch_json_api 函数。
-
-    Args:
-        url: 目标 URL
-        timeout: 超时秒数
-        use_proxies: 是否启用多代理 failover
-        status_cb: 可选回调 fn(proxy_label: str, attempt_idx: int, total: int)
-                   每次切换到新的候选 URL 时调用,用于 UI 反馈
-    """
-    headers = {
-        "User-Agent": "OMG-GIMI-Manager/1.0",
-        "Accept": "application/vnd.github+json",
-    }
-
-    if use_proxies and is_github_url(url) and should_use_proxy(url):
-        candidates = build_download_candidates(url)
-        prefer_direct = False
-    else:
-        candidates = [url]
-        prefer_direct = True
-        if use_proxies and is_github_url(url):
-            logger.info("YouTube 可访问,直连 GitHub (跳过代理前缀)")
-
-    total = len(candidates)
-    openers = get_openers(prefer_direct=prefer_direct)
-    for i, candidate_url in enumerate(candidates):
-        label = _extract_proxy_label(candidate_url, url)
-        if status_cb:
-            try:
-                status_cb(label, i, total)
-            except Exception:
-                pass
-        if should_cancel and should_cancel():
-            logger.info("fetch_json_api_smart 已被取消，提前返回")
-            return None
-        for chan_name, opener in openers:
-            try:
-                req = urllib.request.Request(candidate_url, headers=headers)
-                with opener.open(req, timeout=timeout) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
-            except urllib.error.HTTPError as e:
-                # 限流按 IP 计，换候选 URL / 换通道都无效，立刻放弃并透传提示。
-                # 否则会把全部候选跑完，最后只报「网络错误」，用户无从下手。
-                if is_rate_limited(e):
-                    hint = rate_limit_hint(e)
-                    logger.warning(f"GitHub API 限流，停止重试: {hint}")
-                    raise RateLimitedError(hint) from e
-                logger.warning(f"API 请求失败 ({candidate_url} · {chan_name}): {e}")
-                continue
-            except Exception as e:
-                logger.warning(f"API 请求失败 ({candidate_url} · {chan_name}): {e}")
-                continue
-
-    return None
+                (response, first, total), route = _race(
+                    url, routes, operation, key, should_cancel, status,
+                    cleanup=lambda value: value[0].close() if value[0] is not None else None)
+                if response is None:
+                    _remember(key, route)
+                    return True, ""
+                downloaded = offset if response.status == 206 else 0
+                with response, open(dest_path, "ab" if response.status == 206 else "wb") as target:
+                    chunk = first
+                    while chunk:
+                        if should_cancel and should_cancel():
+                            raise _Cancelled()
+                        target.write(chunk)
+                        downloaded += len(chunk)
+                        if signals and total:
+                            try:
+                                lo, hi = progress_range
+                                signals.progress.emit(float(lo + min(1, downloaded / total) * (hi - lo)))
+                                signals.status.emit(f"下载中... {downloaded / 1048576:.1f} / {total / 1048576:.1f} MB", "info")
+                            except Exception:
+                                pass
+                        chunk = response.read(chunk_size)
+                if total and downloaded != total:
+                    raise ValueError("下载未完成 (中断或长度不匹配)")
+                _remember(key, route)
+                return True, ""
+            except _Cancelled:
+                return False, "已取消"
+            except RateLimitedError as error:
+                return False, str(error)
+            except OSError as error:
+                if error.errno in (errno.ENOSPC, errno.EACCES, errno.EROFS):
+                    return False, ("磁盘空间不足，请清理后重试" if error.errno == errno.ENOSPC
+                                   else f"无写入权限: {dest_path}")
+                last_error = f"网络错误: {error}"
+            except Exception as error:
+                last_error = f"下载失败: {error}"
+            finally:
+                if response is not None:
+                    response.close()
+            if route is None:
+                break
+            _forget(key, route)
+            routes = [candidate for candidate in routes if candidate[:2] != route[:2]]
+        if round_index < MAX_RETRIES_PER_URL:
+            # Cancel remains responsive during retry backoff.
+            until = time.monotonic() + RETRY_BACKOFF_BASE ** (round_index + 1)
+            while time.monotonic() < until:
+                if should_cancel and should_cancel():
+                    return False, "已取消"
+                time.sleep(0.05)
+    return False, last_error
 
 
 # ============================================================
@@ -937,12 +674,3 @@ if __name__ == "__main__":
             print("\n所有代理当前均不可用")
     else:
         print("\n(传入 --probe 参数可触发代理测速)")
-
-    # 可选: YouTube 可达性探测 (传入 --youtube 参数触发)
-    if "--youtube" in _sys.argv:
-        print("\n=== YouTube 可达性探测 ===")
-        reachable = is_youtube_reachable(force_refresh=True)
-        print(f"YouTube 可访问: {reachable}")
-        print(f"将{'启用' if should_use_proxy(test) else '跳过'}代理下载 GitHub 资源")
-    else:
-        print("(传入 --youtube 参数可触发 YouTube 可达性探测)")

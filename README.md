@@ -6,6 +6,8 @@
 
 [使用说明](intro.md) · [手动构建指南](omg_neo/docs/手动构建指南.md) · [Agent 构建流程](omg_neo/docs/Agent构建流程.md)
 
+本体离线更新可使用独立的 [TUI Updater](updater/README.md)：手动添加 ZIP，保留用户数据，完整备份旧目录，并支持失败恢复与程序回退。GitHub 联网更新接口暂未启用。
+
 ![OMG-Neo 浅色首页](docs/screenshots/home.png)
 
 ## 功能一览

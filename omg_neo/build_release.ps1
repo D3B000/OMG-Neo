@@ -52,6 +52,15 @@ Get-ChildItem -LiteralPath $releaseRoot -Force |
   } |
   Copy-Item -Destination $packageRoot -Recurse -Force
 & (Join-Path (Split-Path $appRoot) 'backend\build.ps1') -Python $Python -Output (Join-Path $packageRoot 'backend')
+# Keep local/offline update packages self-describing; the standalone updater also
+# accepts older ZIPs without this manifest after structural and PE checks.
+$versionLine = Get-Content -LiteralPath (Join-Path $appRoot 'pubspec.yaml') |
+  Where-Object { $_ -match '^version:\s*\S+' } | Select-Object -First 1
+if (!$versionLine) { throw 'pubspec.yaml 缺少 version。' }
+$packageVersion = ($versionLine -replace '^version:\s*', '').Trim()
+& $Python (Join-Path (Split-Path $appRoot) 'updater\main.py') `
+  --create-manifest $packageRoot --version $packageVersion --configuration $Configuration
+if ($LASTEXITCODE -ne 0) { throw '生成更新清单失败。' }
 $privateFiles = @(Get-ChildItem -LiteralPath $packageRoot -Recurse -Force |
   Where-Object {
     $_.Name -in @('AppData', 'config.json', 'config.json.bak', 'loader_config.json', '.backend.lock') -or

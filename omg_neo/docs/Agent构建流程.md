@@ -9,6 +9,7 @@
 | `omg_neo/build_release.ps1` | 完整包入口；支持 Debug/Release；隔离 Flutter 设置，构建并组装前后端 |
 | `backend/build.ps1` | 调用正式 spec；向指定空目录复制完整冻结后端 |
 | `backend/neo_hosts.spec` | 两份独立 Analysis/PYZ，单次 COLLECT 共享运行时；依赖冲突和注入端依赖检查 |
+| `updater/main.py` / `updater/engine.py` | 独立 TUI 更新器与清单生成；统一构建会生成 update-manifest.json |
 | `omg_neo/validation/verify_distribution_v001.py` | 洁净审计、冻结服务检查、README、ZIP、CRC、SHA-256、报告 |
 | `backend/PROCESS_MODEL.md` | 常驻服务和一次性注入端行为 |
 | `backend/PACKAGING.md` | 双入口打包及依赖裁剪依据 |
@@ -110,7 +111,8 @@ if (Test-Path -LiteralPath $packageRoot) { throw 'Target already exists' }
 4. 构建 Windows 前端：显式模式、OMG_UI_REVIEW、完整图标字体和 --no-pub。
 5. 仅收集 data、omg_neo.exe、DLL 和可选 native_assets.json。
 6. 调用 backend/build.ps1，使用 neo_hosts.spec 构建服务和注入端并共享依赖。
-7. 复制到新包 backend，执行脚本自带的初步隐私检查。
+7. 复制到新包 backend，调用 updater/main.py 生成含版本、模式和程序文件 SHA-256 的更新清单。
+8. 执行脚本自带的初步隐私检查。
 
 脚本自身不创建 ZIP。原生 INFO/deprecation 的 stderr 输出不是单独的失败依据；以退出码、异常及产物检查为准。外部命令失败必须停止后续交付。
 
@@ -212,3 +214,7 @@ UI 调整工具：启用 / 已隐藏
 ```
 
 面向用户的最终消息只需提供模式、产物链接、实际验证结果和必要限制。构建日志、报告及交接记录承担详细证据，不能用“构建成功”替代验证说明。
+
+## 8. 本体更新器交接
+
+独立更新器位于 `updater`，使用 `updater/build.ps1` 构建单文件 EXE。它不能从待更新安装目录内运行，不随程序目录直接覆盖自身。手动本地 ZIP、用户数据保留、旧目录完整备份、回退和中断恢复已经实现；GitHub 下载仍为抛出 NotImplementedError 的接口预留，不能报告为已支持联网更新。详细规则与测试命令见 [Updater 文档](../../updater/README.md)。
