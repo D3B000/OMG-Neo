@@ -112,6 +112,9 @@ OMG-Neo/
 
 ## 许可与致谢
 
+- 感谢 [endfield-ui-skill](https://github.com/hhikr/endfield-ui-skill) 提供的 UI 风格。
+- 感谢 [XXMI-Launcher](https://github.com/SpectrumQT/XXMI-Launcher) 提供的注入方式。
+- 感谢[辉夜海灵顿](https://www.homuhomu.cn/bbs/forum.php?mod=forumdisplay&fid=39)提供的服务器切换方法和替换包制作方法。
 - 共享 OMGLite 代码保留原始 [MIT 许可](OMGLite/LICENSE)。
 - Saira 字体使用 [SIL Open Font License](omg_neo/fonts/Saira-OFL.txt)。
 - GIMI、3DMigoto 及相关组件属于各自项目；使用或分发时请遵循对应许可。
