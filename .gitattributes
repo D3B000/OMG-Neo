@@ -1,0 +1,10 @@
+* text=auto
+*.py text eol=lf
+*.dart text eol=lf
+*.md text eol=lf
+*.ps1 text eol=crlf
+*.dll binary
+*.exe binary
+*.pyd binary
+*.ttf binary
+*.ico binary

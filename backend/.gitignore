@@ -1,0 +1,7 @@
+__pycache__/
+build/
+dist/
+*.spec
+!neo_hosts.spec
+!validation/neo_hosts_test.spec
+tests/.runtime/

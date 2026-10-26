@@ -1,0 +1,27 @@
+# Local tools, design references and runtime data
+.workbuddy/
+.validation-br/
+endfield-ui-skill-main/
+endfield-ui-skill-main.zip
+**/AppData/
+**/log/
+**/logs/
+**/__pycache__/
+*.py[cod]
+!backend/vendor/ritual/*.pyd
+*.log
+*.bak
+.env
+.env.*
+!.env.example
+**/.runtime/
+**/.idea/
+**/.vscode/
+**/build/
+**/build-*/
+**/dist/
+**/.build-tools*/
+omg_neo/design-reviews/
+omg_neo/shots/
+# Obsolete generated spec with machine-specific absolute paths
+backend/omg_backend.spec

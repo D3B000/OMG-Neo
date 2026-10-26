@@ -1,0 +1,21 @@
+name: omg_neo
+description: OMG-Neo Flutter desktop UI prototype
+publish_to: none
+version: 0.0.1+1
+environment:
+  sdk: ^3.6.0
+dependencies:
+  desktop_drop: 0.7.0
+  flutter:
+    sdk: flutter
+  window_manager: ^0.5.0
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+flutter:
+  uses-material-design: true
+  fonts:
+    - family: Saira
+      fonts:
+        - asset: fonts/Saira.ttf
