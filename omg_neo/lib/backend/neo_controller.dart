@@ -14,6 +14,8 @@ class NeoController extends ChangeNotifier {
   StreamSubscription<Map<String, dynamic>>? _subscription;
   Map<String, dynamic> settings = {}, versions = {};
   Map<String, dynamic> buildState = {}, resources = {}, cleanup = {};
+  Map<String, dynamic> bisectState = {};
+  bool bisectActive = false;
   final _buildLogs = LogBuffer()..add('终端已就绪。');
   List<String> get buildLogs => _buildLogs.lines;
   int buildLogRevision = 0;
@@ -55,6 +57,7 @@ class NeoController extends ChangeNotifier {
       await (backend as RecoverableNeoBackend).restart();
       _snapshot(Map<String, dynamic>.from(
           (await backend.call('hello', {'protocol': 1}))['snapshot']));
+      if (bisectActive) bisectState = await backend.call('bisect.state');
       // Reconcile queued settings against the new process's current revision.
       ready = true;
       await save();
@@ -91,7 +94,11 @@ class NeoController extends ChangeNotifier {
       _snapshot(Map<String, dynamic>.from(hello['snapshot']));
       ready = true;
       settingsEpoch++;
-      status = settings['gimi_folder'] == '' ? '请配置游戏与 GIMI 目录' : '配置已加载';
+      status = bisectActive
+          ? '存在未结束的二分排查，请进入工具核对恢复'
+          : settings['gimi_folder'] == ''
+              ? '请配置游戏与 GIMI 目录'
+              : '配置已加载';
       update.enabled = !closing;
       notifyListeners();
       if (closing) return;
@@ -116,6 +123,7 @@ class NeoController extends ChangeNotifier {
     }
     versions = Map<String, dynamic>.from(snapshot['versions'] as Map);
     revision = snapshot['revision'] as int;
+    bisectActive = snapshot['bisectActive'] == true;
     launchState = snapshot['launchState'] as String? ?? launchState;
     launchDetail = snapshot['launchDetail'] as String? ?? launchDetail;
   }
@@ -153,7 +161,8 @@ class NeoController extends ChangeNotifier {
           if (data['message'] != null) _buildLog(status);
           break;
         }
-        if (taskKind.startsWith('resources.') ||
+        if (taskKind.startsWith('bisect.') ||
+            taskKind.startsWith('resources.') ||
             taskKind.startsWith('serverSwitch.') ||
             taskKind == 'cache.clear') {
           break;
@@ -198,6 +207,12 @@ class NeoController extends ChangeNotifier {
           cacheMessage = status;
           cacheProgress = data['state'] == 'succeeded' ? 1 : null;
           if ((result['errors'] as List? ?? []).isNotEmpty) error = status;
+        }
+        if (result['bisect'] != null) {
+          bisectState = Map<String, dynamic>.from(result['bisect']);
+          bisectActive = !['idle', 'closed'].contains(bisectState['status']);
+          resourcesLoaded = false;
+          resourceEpoch++;
         }
         if (result['build'] != null) {
           buildState = Map<String, dynamic>.from(result['build']);
@@ -287,6 +302,17 @@ class NeoController extends ChangeNotifier {
     _buildLogs.add(line);
   }
 
+  Future<void> loadBisect() async {
+    if (!ready || busy) return;
+    try {
+      bisectState = await backend.call('bisect.state');
+      bisectActive = !['idle', 'closed'].contains(bisectState['status']);
+      notifyListeners();
+    } catch (exception) {
+      fail(exception);
+    }
+  }
+
   Future<void> loadBuild() async {
     if (!ready) return;
     try {
@@ -320,7 +346,9 @@ class NeoController extends ChangeNotifier {
     if (method.startsWith('build.')) _buildLog('> $method');
     notifyListeners();
     try {
-      await flush();
+      // Recovery must remain available even when an unrelated settings draft
+      // was rejected while scanning. The backend owns the frozen config.
+      if (!(method.startsWith('bisect.') && bisectActive)) await flush();
       final result = await backend.call(method, params);
       if (!_finished.remove(result['taskId'])) {
         taskId = result['taskId'] as String;
@@ -377,6 +405,19 @@ class NeoController extends ChangeNotifier {
 
   void stage(Map<String, dynamic> patch) {
     if (closing) return;
+    if (bisectActive) {
+      const appearance = {'theme', 'accent_color'};
+      bool same(Object? a, Object? b) =>
+          a is List && b is List ? listEquals(a, b) : a == b;
+      if (patch.entries.any((e) =>
+          !appearance.contains(e.key) && !same(settings[e.key], e.value))) {
+        fail(StateError('二分排查期间不能修改业务设置，请先恢复或结束会话'));
+        return;
+      }
+      patch = Map.fromEntries(
+          patch.entries.where((e) => appearance.contains(e.key)));
+      if (patch.isEmpty) return;
+    }
     noticeKind = 'settings';
     _pending.addAll(patch);
     saving = true;

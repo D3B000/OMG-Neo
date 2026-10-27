@@ -26,3 +26,5 @@ omg_neo/shots/
 # Obsolete generated spec with machine-specific absolute paths
 backend/omg_backend.spec
 updater/validation/
+# Local third-party reference checkout
+nahida-desktop-3.42.0/

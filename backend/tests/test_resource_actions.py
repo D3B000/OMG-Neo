@@ -71,17 +71,18 @@ class ResourceActionsTest(unittest.TestCase):
             self.service.open_image({'id': item['id'], 'revision': listing['revision']})
             start.assert_called_once_with(str(image))
 
-    def test_thumbnail_refresh_observes_nested_changes_and_preserves_shallow_mod_detection(self):
+    def test_mod_thumbnail_refresh_observes_nested_changes(self):
         mod = self.root / 'group'
         nested = mod / 'assets'
         nested.mkdir(parents=True)
+        (mod / 'mod.ini').write_text('[Constants]\n')
         (nested / 'mod.ini').write_text('[Constants]\n')
         (nested / 'normal.png').write_bytes(b'texture')
         self.assertIsNone(self.service.listing()['items'][0]['thumbnailPath'])
         image = nested / 'photo.jpg'
         image.write_bytes(b'image')
         item = self.service.listing()['items'][0]
-        self.assertFalse(item['isMod'])
+        self.assertTrue(item['isMod'])
         self.assertEqual(item['thumbnailPath'], str(image))
         preview = nested / 'PREVIEW.webp'
         image.rename(preview)
@@ -89,10 +90,55 @@ class ResourceActionsTest(unittest.TestCase):
         preview.unlink()
         self.assertIsNone(self.service.listing()['items'][0]['thumbnailPath'])
 
+    def test_folder_thumbnail_is_shallow_and_has_no_preview_name_priority(self):
+        folder = self.root / 'group'
+        nested = folder / 'nested'
+        nested.mkdir(parents=True)
+        (nested / 'mod.ini').write_text('[Constants]\n')
+        (nested / 'preview.png').write_bytes(b'nested preview')
+        item = self.service.listing()['items'][0]
+        self.assertFalse(item['isMod'])
+        self.assertIsNone(item['thumbnailPath'])
+        (folder / 'PREVIEW.png').write_bytes(b'preview')
+        cover = folder / 'a.jpg'
+        cover.write_bytes(b'cover')
+        listing = self.service.listing()
+        item = listing['items'][0]
+        self.assertEqual(item['thumbnailPath'], str(cover))
+        with patch('resource_browser.os.startfile') as start:
+            self.service.open_image({'id': item['id'], 'revision': listing['revision']})
+            start.assert_called_once_with(str(cover))
+
+    def test_card_conversion_changes_thumbnail_search_and_persists(self):
+        mod = self.root / 'Outfit'
+        nested = mod / 'assets'
+        nested.mkdir(parents=True)
+        (mod / 'mod.ini').write_text('[Constants]\n')
+        cover = mod / 'a.jpg'
+        cover.write_bytes(b'cover')
+        preview = nested / 'PrEvIeW.png'
+        preview.write_bytes(b'preview')
+        (mod / 'preview.jpg').write_bytes(b'direct preview')
+        # Remove the direct preview after the first folder conversion so both
+        # name priority and recursive search are checked using the same cache.
+        listing = self.service.listing()
+        for is_mod, expected in ((False, cover), (True, preview), (False, cover)):
+            item = listing['items'][0]
+            listing = self.service.card({'id': item['id'], 'revision': listing['revision'],
+                                         'isMod': is_mod}, None)
+            self.assertEqual(listing['items'][0]['isMod'], is_mod)
+            self.assertEqual(listing['items'][0]['thumbnailPath'], str(expected))
+            if not is_mod and (mod / 'preview.jpg').exists():
+                (mod / 'preview.jpg').unlink()
+                listing = self.service.listing()
+        fresh = ResourceService(self.base / 'data', self.service.config)
+        self.assertEqual(fresh.listing()['items'][0]['thumbnailPath'], str(cover))
+
     def test_thumbnail_prunes_directory_link_cycles(self):
         mod = self.root / 'Outfit'
         nested = mod / 'assets'
         nested.mkdir(parents=True)
+        (mod / 'mod.ini').write_text('[Constants]\n')
         image = nested / 'preview.jpg'
         image.write_bytes(b'preview')
         original_token = self.service.token

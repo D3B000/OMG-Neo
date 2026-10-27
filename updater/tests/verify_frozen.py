@@ -54,7 +54,7 @@ def main():
         (install / 'obsolete.dll').write_bytes(b'old dependency')
         old_executable = digest(install / 'omg_neo.exe')
         output = run(['--install-dir', install, '--package', args.debug.absolute()],
-                     '4\n\n5\nUPDATE\n\n0\n', 'frozen-update.log')
+                     '4\n\n5\n\n\n0\n', 'frozen-update.log')
         assert '更新完成' in output
         assert validate_payload(install)['configuration'] == 'Debug'
         assert json.loads(settings.read_text(encoding='utf-8'))['user'] == '保留数据'

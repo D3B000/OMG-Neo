@@ -15,6 +15,7 @@ import 'build_ui.dart';
 import 'link_ui.dart';
 import 'server_switch_ui.dart';
 import 'tool_tile.dart';
+import 'bisect_ui.dart';
 import 'update_preview.dart';
 import 'home_ui.dart';
 import 'resources_ui.dart';
@@ -128,7 +129,7 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
   GlobalKey get capture => widget.captureKey;
   final settingsDraft = SettingsDraft();
   late int page = widget.resources ? 1 : 0;
-  bool building = false, linking = false, switching = false;
+  bool building = false, linking = false, switching = false, bisecting = false;
   final linkDraft = LinkDraft();
   final resourcesDraft = ResourcesDraft();
   final buildDraft = BuildDraft();
@@ -225,6 +226,23 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
   @override
   void onWindowClose() async {
     if (_closing) return;
+    if (widget.controller?.bisectActive == true) {
+      final leave = await showEfDialog<bool>(
+          context: context,
+          builder: (ctx) => EfDialog(
+                eyebrow: 'BISECT SESSION',
+                title: const Text('排查会话尚未结束'),
+                content: const Text(
+                    '分组结构、初始快照和当前启停状态均已记录。可以返回继续操作，或保留当前状态退出，下次核对后继续使用分组。'),
+                actions: [
+                  EfButton('返回处理',
+                      small: true, onPressed: () => Navigator.pop(ctx, false)),
+                  EfButton('保留会话并退出',
+                      small: true, onPressed: () => Navigator.pop(ctx, true))
+                ],
+              ));
+      if (leave != true || !mounted) return;
+    }
     _closing = true;
     final navigator = Navigator.of(context, rootNavigator: true);
     final closingRoute = efDialogRoute<void>(
@@ -258,13 +276,15 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
   }
 
   EfColors get c => EfColors.of(context);
-  String get screen => building
-      ? 'build'
-      : switching
-          ? 'serverSwitch'
-          : linking
-              ? 'links'
-              : ['home', 'resources', 'tools', 'settings'][page];
+  String get screen => bisecting
+      ? 'bisect'
+      : building
+          ? 'build'
+          : switching
+              ? 'serverSwitch'
+              : linking
+                  ? 'links'
+                  : ['home', 'resources', 'tools', 'settings'][page];
   void notice(String message) => showEfToast(context, message);
   Widget region(String id, Widget child) => uiReviewEnabled
       ? ReviewRegion(
@@ -292,6 +312,7 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
         building = false;
         linking = false;
         switching = false;
+        bisecting = false;
       });
   @override
   void dispose() {
@@ -306,6 +327,9 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
     super.dispose();
   }
 
+  Widget pageGround({required Widget child}) =>
+      bisecting ? child : EfContours(child: child);
+
   @override
   Widget build(BuildContext context) => Scaffold(
         body: ReviewHost(
@@ -314,7 +338,7 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
           screen: screen,
           child: ColoredBox(
             color: c.paper,
-            child: EfContours(
+            child: pageGround(
                 child: Column(
               children: [
                 region('window.titlebar', caption()),
@@ -324,43 +348,57 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
                       Positioned.fill(
                         child: Padding(
                           padding: EdgeInsets.fromLTRB(
-                              32,
-                              page == 1 ? 14 : 22,
-                              32,
-                              building ||
+                              bisecting ? 0 : 32,
+                              bisecting
+                                  ? 0
+                                  : page == 1
+                                      ? 14
+                                      : 22,
+                              bisecting ? 0 : 32,
+                              bisecting ||
+                                      building ||
                                       linking ||
                                       switching ||
                                       page == 3 ||
                                       page == 1
                                   ? 0
                                   : 84),
-                          child: building
-                              ? buildPage()
-                              : switching
-                                  ? NeoServerSwitch(
-                                      controller: widget.controller,
-                                      region: region,
-                                      pickPath: pickPath,
-                                      onBack: () =>
-                                          setState(() => switching = false))
-                                  : linking
-                                      ? NeoLinks(
-                                          draft: linkDraft,
-                                          gimi: settingsDraft.gimi.text,
-                                          onBack: () =>
-                                              setState(() => linking = false),
-                                          pickPath: pickPath,
+                          child: bisecting
+                              ? NeoBisect(
+                                  controller: widget.controller,
+                                  pickPath: pickPath,
+                                  region: region,
+                                  onBack: () =>
+                                      setState(() => bisecting = false))
+                              : building
+                                  ? buildPage()
+                                  : switching
+                                      ? NeoServerSwitch(
+                                          controller: widget.controller,
                                           region: region,
-                                          backend: widget.controller?.backend,
-                                          ready: widget.controller?.ready ==
-                                                  true &&
-                                              widget.controller?.busy == false)
-                                      : [
-                                          home,
-                                          resources,
-                                          tools,
-                                          settings
-                                        ][page](),
+                                          pickPath: pickPath,
+                                          onBack: () =>
+                                              setState(() => switching = false))
+                                      : linking
+                                          ? NeoLinks(
+                                              draft: linkDraft,
+                                              gimi: settingsDraft.gimi.text,
+                                              onBack: () => setState(
+                                                  () => linking = false),
+                                              pickPath: pickPath,
+                                              region: region,
+                                              backend:
+                                                  widget.controller?.backend,
+                                              ready: widget.controller?.ready ==
+                                                      true &&
+                                                  widget.controller?.busy ==
+                                                      false)
+                                          : [
+                                              home,
+                                              resources,
+                                              tools,
+                                              settings
+                                            ][page](),
                         ),
                       ),
                       Positioned(
@@ -371,6 +409,25 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
                           child: region('navigation.bottom', bottomBar()),
                         ),
                       ),
+                      if (bisecting)
+                        Positioned(
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            child: region(
+                                'bisect.progress',
+                                AnimatedBuilder(
+                                    animation: widget.controller ?? preview,
+                                    builder: (_, __) {
+                                      final task = widget.controller;
+                                      return BottomTaskProgress(
+                                          active: task?.busy == true &&
+                                              (task?.taskKind
+                                                      .startsWith('bisect.') ??
+                                                  false),
+                                          progress: task?.taskProgress,
+                                          message: task?.status ?? '正在处理模组…');
+                                    }))),
                       if (switching)
                         Positioned(
                             left: 0,
@@ -390,7 +447,11 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
                                           progress: task?.taskProgress,
                                           message: task?.status ?? '');
                                     }))),
-                      if (!building && !linking && !switching && page == 0)
+                      if (!bisecting &&
+                          !building &&
+                          !linking &&
+                          !switching &&
+                          page == 0)
                         Positioned(
                           left: 0,
                           right: 0,
@@ -426,13 +487,15 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
                       ),
                       const SizedBox(width: 10),
                       Text(
-                        building
-                            ? '便捷构建'
-                            : switching
-                                ? '服务器切换'
-                                : linking
-                                    ? '便捷关联'
-                                    : 'OMG-Neo',
+                        bisecting
+                            ? '二分排查'
+                            : building
+                                ? '便捷构建'
+                                : switching
+                                    ? '服务器切换'
+                                    : linking
+                                        ? '便捷关联'
+                                        : 'OMG-Neo',
                         style: EfType.ui(13, weight: 700, color: c.ink),
                       ),
                       const SizedBox(width: 18),
@@ -499,7 +562,7 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
         children: [
           head('TOOLBOX', '工具'),
           const SizedBox(height: 13),
-          Text('构建产物与关联目录。', style: EfType.ui(12, color: c.ink2)),
+          Text('构建、关联目录、服务器切换与模组排查。', style: EfType.ui(12, color: c.ink2)),
           const SizedBox(height: 30),
           Expanded(
             child: Row(
@@ -533,6 +596,15 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
                   Icons.swap_horiz,
                   () => setState(() => switching = true),
                 ),
+                const SizedBox(width: 18),
+                toolCard(
+                    'tools.bisect',
+                    '04',
+                    'BISECT',
+                    '二分排查',
+                    '递归分组与独立启停\n初始状态记录与恢复',
+                    Icons.account_tree_outlined,
+                    () => setState(() => bisecting = true)),
               ],
             ),
           ),
@@ -550,6 +622,8 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
                   detail: detail,
                   icon: icon,
                   onTap: tap)));
+  bool navigationSelected(int i) =>
+      bisecting ? i == 2 : !building && !linking && !switching && page == i;
   Widget bottomBar() => Container(
         padding: const EdgeInsets.all(4),
         decoration: ShapeDecoration(
@@ -563,7 +637,7 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 2),
                 child: Semantics(
-                  selected: !building && !linking && !switching && page == i,
+                  selected: navigationSelected(i),
                   child: SizedBox(
                     width: 138,
                     height: 36,
@@ -575,7 +649,7 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
                         'CONFIG'
                       ][i]}',
                       () => go(i),
-                      primary: !building && !linking && !switching && page == i,
+                      primary: navigationSelected(i),
                     ),
                   ),
                 ),

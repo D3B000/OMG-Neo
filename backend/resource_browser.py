@@ -112,8 +112,15 @@ class ResourceService:
         return self.cached(self.direct_cache, key, inspect, 2048)
 
     def direct_metadata(self, path, stamp, worker=None):
-        """Keep mod detection shallow and search all descendants for a preview."""
-        stack, seen, best, is_mod = [(path, stamp)], set(), None, False
+        """Use the effective card type to choose shallow or recursive previews."""
+        self.cancelled(worker)
+        detected_mod, images, _ = self.directory_metadata(path, stamp)
+        is_mod = self.preferences.get(stamp[0], {}).get("isMod", detected_mod)
+        if not is_mod:
+            # Folder covers use only direct images, without preview-name scores.
+            names = [name for _, name in images]
+            return False, min(names, key=lambda name: (name.casefold(), name)) if names else None
+        stack, seen, best = [(path, stamp)], set(), None
         while stack:
             self.cancelled(worker)
             current, current_stamp = stack.pop()
@@ -122,13 +129,11 @@ class ResourceService:
                 if current_stamp[0] in seen:
                     continue
                 seen.add(current_stamp[0])
-                direct_mod, images, directories = self.directory_metadata(current, current_stamp)
+                _, images, directories = self.directory_metadata(current, current_stamp)
             except (OSError, ValueError):
                 if current == path:
                     raise
                 continue
-            if current == path:
-                is_mod = direct_mod
             for score, name in images:
                 relative = (current / name).relative_to(path)
                 candidate = (score, len(relative.parts), relative.as_posix().casefold(), relative.as_posix())

@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 from engine import (MANIFEST, UpdateError, Updater, digest, inspect_package,
                     preview_payload, validate_payload, write_manifest)
 from platform_ops import exclusive_lock, running_processes
-from sources import GitHubSource, Release
+from sources import GitHubSource, Release, same_version
 
 
 def pe(tag=b''):
@@ -129,6 +129,85 @@ class UpdaterTests(unittest.TestCase):
             with self.assertRaisesRegex(UpdateError, '复制校验失败'):
                 self.updater.apply(self.zip)
         self.assert_original()
+
+    def test_userdata_large_file_reports_copy_and_both_hashes(self):
+        data = b'x' * (2 * 1024 * 1024 + 17)
+        (self.target / 'AppData/large.bin').write_bytes(data)
+        events = []
+        self.updater.progress = lambda *event: events.append(event)
+        self.updater.apply(self.zip)
+        self.assertEqual((self.target / 'AppData/large.bin').read_bytes(), data)
+        for stage in ('复制文件', '校验原用户数据', '校验已保存数据'):
+            reports = [e for e in events if e[0] == stage and e[1].endswith('large.bin')]
+            self.assertTrue(any(0 < e[2] < e[3] for e in reports), stage)
+            self.assertEqual(reports[-1][2:], (len(data), len(data)))
+        self.assertFalse((self.target / 'AppData/.backend.lock').exists())
+
+    def test_cancel_during_userdata_copy_preserves_original(self):
+        (self.target / 'AppData/large.bin').write_bytes(b'x' * (2 * 1024 * 1024))
+        def cancel(stage, detail, done=0, total=0):
+            if stage == '复制文件' and detail.endswith('large.bin') and done:
+                raise KeyboardInterrupt()
+        self.updater.progress = cancel
+        with self.assertRaises(KeyboardInterrupt):
+            self.updater.apply(self.zip)
+        self.assert_original()
+        self.assertEqual(self.updater.transactions()[0][1]['state'], 'aborted')
+
+    def test_explicit_sha_file_and_alternate_sidecar(self):
+        checksum = digest(self.zip)
+        selected = self.root / 'selected checksum.sha256'
+        selected.write_text(checksum.upper() + ' *update.zip\n', encoding='utf-8-sig')
+        self.assertTrue(inspect_package(self.zip, f'"{selected}"').hash_verified)
+        selected.write_text(checksum)
+        self.assertTrue(inspect_package(self.zip, str(selected)).hash_verified)
+        self.zip.with_suffix('.sha256').write_text(checksum + '  update.zip')
+        self.assertTrue(inspect_package(self.zip).hash_verified)
+        selected.write_text(checksum + '  wrong.zip')
+        with self.assertRaisesRegex(UpdateError, '包名不匹配'):
+            inspect_package(self.zip, str(selected))
+        selected.write_text('0' * 64)
+        with self.assertRaisesRegex(UpdateError, 'SHA-256 不匹配'):
+            inspect_package(self.zip, str(selected))
+
+    def test_enter_confirms_update_other_text_cancels(self):
+        from main import TUI
+        from unittest.mock import Mock
+        updater, package = Mock(), Mock()
+        package.path, package.sha256 = self.zip, 'reviewed'
+        updater.apply.return_value = self.root
+        tui = TUI()
+        with patch.object(tui, 'inspect', return_value=(updater, package)), patch(
+                'builtins.input', side_effect=['', '']), patch('builtins.print'):
+            tui.update()
+        updater.apply.assert_called_once_with(self.zip, '', reviewed_sha256='reviewed')
+        updater.apply.reset_mock()
+        with patch.object(tui, 'inspect', return_value=(updater, package)), patch(
+                'builtins.input', return_value='cancel'), patch('builtins.print'):
+            tui.update()
+        updater.apply.assert_not_called()
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows single-key menu')
+    def test_menu_key_executes_without_line_input(self):
+        from main import menu_key
+        with patch('sys.stdin.isatty', return_value=True), patch('msvcrt.getwch', side_effect=[
+                '\r', '\xe0', 'H', 'x', '5']), patch('builtins.input') as line, patch('builtins.print'):
+            self.assertEqual(menu_key(), '5')
+            line.assert_not_called()
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows console modes')
+    def test_console_disables_quick_edit_without_removing_other_input_flags(self):
+        from main import TUI
+        from unittest.mock import Mock
+        kernel = Mock()
+        kernel.GetStdHandle.side_effect = lambda which: which
+        def read_mode(handle, pointer):
+            pointer._obj.value = 0x47 if handle == -10 else 0x03
+            return True
+        kernel.GetConsoleMode.side_effect = read_mode
+        with patch('ctypes.WinDLL', return_value=kernel), patch('sys.stdout.isatty', return_value=True):
+            TUI()
+        kernel.SetConsoleMode.assert_any_call(-10, 0x87)
 
     def test_backend_byte_lock_held_during_preparation_and_released_after(self):
         checks = []
@@ -349,11 +428,59 @@ Updater(Path(sys.argv[1]), progress, process_check=lambda _: []).apply(Path(sys.
             self.updater.apply(self.zip)
         self.assertEqual(list(outside.iterdir()), [])
 
-    def test_github_stub_does_not_make_requests(self):
-        with self.assertRaises(NotImplementedError):
-            GitHubSource().check_latest('Release')
-        with self.assertRaises(NotImplementedError):
-            GitHubSource().fetch_release(Release('1', 'Release', 'x'), self.root)
+    def release_data(self):
+        return {'tag_name': 'v0.0.2', 'assets': [{
+            'name': 'OMG-Neo-v0.0.2.zip',
+            'browser_download_url': 'https://github.com/D3B000/OMG-Neo/releases/download/v0.0.2/OMG-Neo-v0.0.2.zip'}]}
+
+    def test_github_selects_portable_zip_and_rejects_ambiguity(self):
+        data = self.release_data()
+        data['assets'].append({'name': 'source.zip', 'browser_download_url': 'https://example.com/source.zip'})
+        with patch('sources.download.fetch_json_api_smart', return_value=data):
+            release = GitHubSource().check_latest('Release')
+            self.assertEqual(release.version, 'v0.0.2')
+            data['assets'].append(dict(data['assets'][0]))
+            with self.assertRaises(UpdateError):
+                GitHubSource().check_latest('Release')
+
+    def test_github_html_fallback(self):
+        with patch('sources.download.fetch_json_api_smart', return_value=None), patch(
+                'sources.download.fetch_url_smart', side_effect=[
+                    '<a href="/D3B000/OMG-Neo/releases/tag/v0.0.2">latest</a>',
+                    '<a href="/D3B000/OMG-Neo/releases/download/v0.0.2/OMG-Neo-v0.0.2.zip">ZIP</a>']):
+            self.assertEqual(GitHubSource().check_latest('Release').asset_name, 'OMG-Neo-v0.0.2.zip')
+
+    def test_github_download_validates_hash_and_manifest(self):
+        write_manifest(self.source, '0.0.2+2', 'Release')
+        archive(self.source, self.zip)
+        release = Release('v0.0.2', 'Release', 'OMG-Neo-v0.0.2.zip', digest(self.zip),
+                          self.release_data()['assets'][0]['browser_download_url'], self.zip.stat().st_size)
+        def transfer(url, destination, **kwargs):
+            Path(destination).write_bytes(self.zip.read_bytes())
+            return True, ''
+        with patch('sources.download.download_file_smart', side_effect=transfer):
+            result = GitHubSource().fetch_release(release, self.root / 'downloads')
+            self.assertEqual(digest(result), release.sha256)
+            bad = Release('v0.0.3', 'Release', release.asset_name, release.sha256, release.url, release.size)
+            with self.assertRaises(UpdateError):
+                GitHubSource().fetch_release(bad, self.root / 'bad-downloads')
+            self.assertEqual(list((self.root / 'bad-downloads').iterdir()), [])
+
+    def test_same_version_skips_download_and_update(self):
+        from main import TUI
+        tui = TUI(str(self.target))
+        with patch('main.validate_payload', return_value={'version': '0.0.2+2'}), patch(
+                'main.GitHubSource') as source, patch('builtins.input', return_value=''), patch.object(tui, 'update') as update:
+            source.return_value.check_latest.return_value = Release('v0.0.2', 'Release', 'update.zip')
+            tui.github()
+            source.return_value.fetch_release.assert_not_called()
+            update.assert_not_called()
+
+    def test_version_comparison(self):
+        self.assertTrue(same_version('0.0.2+2', 'v0.0.2'))
+        self.assertFalse(same_version('0.0.2+2', 'v0.0.2+3'))
+        self.assertFalse(same_version('未附版本清单', 'v0.0.2'))
+        self.assertFalse(same_version('0.0.1+1', 'v0.0.2'))
 
     @unittest.skipUnless(os.name == 'nt', 'Windows process API')
     def test_process_scanner_finds_own_python(self):

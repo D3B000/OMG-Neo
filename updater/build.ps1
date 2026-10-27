@@ -6,6 +6,7 @@ try {
   $ErrorActionPreference = 'Continue'
   & $Python -m PyInstaller --noconfirm --clean --onefile --console `
     --name OMG-Neo-Updater --icon (Join-Path $updaterRoot '..\omg_neo\krr.ico') `
+    --paths (Join-Path $updaterRoot '..\OMGLite\src') `
     --distpath (Join-Path $updaterRoot 'dist') --workpath (Join-Path $updaterRoot 'build') `
     --specpath (Join-Path $updaterRoot 'build') (Join-Path $updaterRoot 'main.py')
   if ($LASTEXITCODE -ne 0) { throw 'Updater 构建失败。' }

@@ -149,6 +149,8 @@ def serve(args):
             self.shutdown_timer.timeout.connect(self.try_shutdown)
             self._resources = None
             self._builds = None
+            from bisect_service import BisectService
+            self.bisect = BisectService(root, self.config)
 
         @property
         def resources(self):
@@ -177,7 +179,7 @@ def serve(args):
         def state(self):
             return {**self.config.snapshot(), "versions": self.versions(),
                     "launchState": self.launch_state, "launchDetail": self.launch_detail,
-                    "activeTask": self.task_id, "eventSeq": self.seq}
+                    "activeTask": self.task_id, "eventSeq": self.seq, "bisectActive": self.bisect.active}
 
         def schedule_ini(self):
             now = time.monotonic()
@@ -251,6 +253,9 @@ def serve(args):
                     error = result.get("message", "部分文件未能写回")
                 if kind == "build.cleanup.apply" and result.get("errors"):
                     error = result.get("message", "部分文件清理失败")
+                if kind and kind.startswith("bisect."):
+                    result["bisect"] = self.bisect.state()
+                    result["message"] = self.bisect.state().get("message", "二分状态已更新")
                 if kind and kind.startswith("build.") and "build" not in result:
                     result["build"] = self.builds.state()
                 if not error and kind == "check" and not cancelled:
@@ -377,6 +382,29 @@ def serve(args):
                 if params.get("protocol", 1) != 1:
                     raise ValueError("不兼容的协议版本")
                 return {"protocol": 1, "snapshot": self.state()}
+            if self.bisect.active:
+                if method == "settings.flush":
+                    if self.ini_dirty_since is not None:
+                        raise ValueError("二分会话中有未同步业务配置，请先恢复再处理")
+                    return {"status": "unchanged"}
+                mutations = {"resources.toggle", "resources.move", "resources.card", "resources.writeback",
+                             "updates.apply"}
+                if method in mutations or method.startswith(("links.", "serverSwitch.")) or (method.startswith("build.") and method not in ("build.get", "build.openWorkspace")):
+                    raise ValueError("二分排查会话未结束；请先恢复初始状态或结束会话")
+                if method in ("config.patch", "config.importLite"):
+                    if method == "config.importLite" or any(k not in ("theme", "accent_color") for k in params.get("patch", {})):
+                        raise ValueError("二分排查期间不能修改业务设置，请先结束会话")
+            if method.startswith("bisect."):
+                action = method.split(".", 1)[1]
+                if action == "state":
+                    self.idle_required()
+                    return self.bisect.state()
+                if action == "export":
+                    self.idle_required()
+                    return self.bisect.export()
+                if action == "scan":
+                    self.flush_ini()
+                return self.start_worker(method, lambda worker: {"bisect": self.bisect.dispatch(action, params, worker)})
             if method in ("config.get", "state.get", "versions.detect"):
                 return self.state()
             if method in ("config.patch", "config.importLite"):
@@ -544,6 +572,7 @@ def serve(args):
                         print("退出清理未完成：" + "；".join(report["errors"]), file=sys.stderr)
                 except (OSError, ValueError) as exc:
                     print(f"退出清理未完成：{exc}", file=sys.stderr)
+            self.bisect.close()  # Pending sessions remain journaled; never mutate while a game may be running.
             app.quit()
 
     app = QCoreApplication([])

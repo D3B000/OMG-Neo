@@ -1,6 +1,6 @@
 # OMG-Neo TUI Updater
 
-独立 Windows x64 终端更新器，当前使用手动添加的本地 ZIP。版本 0.0.1；不联网，不自动启动应用或游戏，不自动结束进程。
+独立 Windows x64 终端更新器，支持 GitHub 最新版本下载和手动添加本地 ZIP。版本 0.0.1；不自动启动应用或游戏，不自动结束进程。
 
 ## 使用
 
@@ -19,11 +19,11 @@ D:/Tools/
 ```
 
 1. 正常退出 OMG-Neo，等待其后端和注入端结束。
-2. 菜单 **1** 设置包含 `omg_neo.exe` 的原安装目录。
-3. 菜单 **2** 添加完整 ZIP；支持在终端中拖入路径。不要先将包解压覆盖安装。
-4. ZIP 旁若有同名 `.zip.sha256`，自动核对；也可用菜单 **3** 输入校验值。
+2. 主菜单直接按数字键执行，无需回车。按 **1** 设置包含 `omg_neo.exe` 的原安装目录，路径输入完仍需回车。
+3. 菜单 **7** 查询并下载 GitHub 最新正式版本；版本相同直接返回。也可用菜单 **2** 添加完整本地 ZIP，支持在终端中拖入路径。不要先将包解压覆盖安装。
+4. ZIP 旁若有同名 `.zip.sha256` 或 `.sha256`，自动核对（优先 `.zip.sha256`）；也可用菜单 **3** 输入校验值，或输入／拖入 `.sha256` 文件路径。文件支持纯哈希或 `哈希  包文件名`，有文件名时必须与 ZIP 匹配。`--sha256` 参数同样支持文件路径。
 5. 菜单 **4** 查看目标、包信息、哈希、解压大小与备份位置。
-6. 菜单 **5** 再次显示操作内容，输入 `UPDATE` 后更新。
+6. 菜单 **5** 再次显示操作内容，直接按回车开始更新；输入其他内容后回车取消。
 7. 成功后从原安装路径启动 OMG-Neo。旧版本备份不自动清理。
 
 可预填路径，仍须在 TUI 中确认：
@@ -42,6 +42,8 @@ D:/Tools/
 程序根目录中的 `omg_neo.exe`、所有 DLL/PDB、`data`、`backend`、`README.txt`、`launch.ps1`、`native_assets.json` 和 `update-manifest.json` 属于程序文件。新包提供它们的新副本，旧包多余的 DLL、PDB 和后端依赖随整个旧目录进入备份。
 
 其他根目录内容都保留，包括 `AppData`、`ui-reviews`、自定义导出文件和未知用户目录。它们复制到新暂存目录，并逐文件核对 SHA-256；安装路径保持原样，保存的绝对路径不因更新而变化。运行期 `.backend.lock` 不复制到新目录。
+
+复制与用户数据哈希校验按 1 MiB 分块显示文件和字节进度，输出最多每秒刷新约 10 次。Windows 控制台关闭“快速编辑”，避免误选输出后暂停进程、需要回车才继续的现象；更新期间无需按键推动执行。
 
 ZIP 不允许携带 AppData 或其他未知的根目录内容，避免包覆盖用户数据。`backend` 和 `data` 是程序专用目录，不适合存放个人文件。原安装目录中的个人内容无论是否属于保留规则，都在完整旧目录备份中。
 
@@ -132,8 +134,12 @@ if ($LASTEXITCODE -ne 0) { throw 'Frozen updater integration failed' }
 
 实际清单覆盖全部分发文件，清单自身不作自哈希。验包器继续负责生成 ZIP 和相邻 SHA-256。旧的已交付 ZIP 不会被追写或修改。
 
-## GitHub 预留
+## GitHub 更新
 
-`sources.UpdateSource` 定义 `check_latest(configuration) -> Release` 与 `fetch_release(release, destination) -> Path`。`GitHubSource` 当前明确抛出 `NotImplementedError`，菜单只显示未启用提示，没有后台请求或假更新结果。
+默认仓库为 `D3B000/OMG-Neo`。菜单 **7** 查询 `/releases/latest` 的正式版本，优先 GitHub API，API 不可用或限流时回退 releases HTML 和 expanded_assets。只选择唯一的 OMG-Neo Release ZIP，排除源码、Debug 和 updater 包；资源缺失或存在歧义时明确报错。
 
-仓库公开后，在该适配器中实现仓库配置、Release 资源选择、限时下载、校验来源和临时文件提交。获取到本地 ZIP 后仍走现有 `inspect_package`、预览确认和事务引擎，不允许下载逻辑绕过文件检查或直接覆盖安装目录。
+直接复用 `OMGLite/src/omg/core/download.py`：系统代理／直连与 GitHub 镜像错峰竞争、TLS 证书校验、按网络缓存可用通道、自动重试和 Range 断点续传。构建脚本将这个共享模块打入独立 EXE，无需安装 OMG-Neo 后端依赖。
+
+本地版本来自 `update-manifest.json`，与最新 Release 标签比较时忽略 `v` 前缀；标签未提供 Flutter `+build` 时按主版本比较，双方都提供时也比较 build。同版本无需下载或更新。旧安装缺少清单时不能确认版本相同，因此继续下载并预览。本地 ZIP 菜单仍允许手动同版本重建。
+
+下载保存在安装目录旁的 `.安装目录名.updates/downloads`，中断的 `.part` 文件可续传。发布 API 提供的 SHA-256 和资源大小用于核对下载，随后检查 ZIP、包内版本清单与 Release 标签及前端模式，再进入预览、回车确认和现有事务引擎。Release ZIP 必须包含有效版本清单；HTML 回退时没有 API 哈希，仍执行包结构和清单校验。

@@ -31,9 +31,17 @@ class UpdateError(RuntimeError):
     pass
 
 
-def digest(path: Path) -> str:
+def digest(path: Path, progress=None) -> str:
     with path.open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        if progress is None:
+            return hashlib.file_digest(stream, 'sha256').hexdigest()
+        result, done, total = hashlib.sha256(), 0, path.stat().st_size
+        progress(0, total)
+        while chunk := stream.read(1024 * 1024):
+            result.update(chunk)
+            done += len(chunk)
+            progress(done, total)
+        return result.hexdigest()
 
 
 def linked(path: Path) -> bool:
@@ -139,22 +147,35 @@ class Package:
     size: int
 
 
+def resolve_sha256(value: str, package: Path) -> str:
+    value = value.strip()
+    if re.fullmatch('[a-fA-F0-9]{64}', value):
+        return value.lower()
+    if value:
+        sidecar = safe_path(Path(value.strip('"').strip("'")))
+        if sidecar.suffix.lower() != '.sha256' or not sidecar.is_file():
+            raise UpdateError('请输入 64 位 SHA-256，或有效的 .sha256 文件路径。')
+    else:
+        sidecar = next((p for p in (package.with_suffix('.zip.sha256'), package.with_suffix('.sha256'))
+                        if p.exists()), None)
+        if sidecar is None:
+            return ''
+        safe_path(sidecar)
+    if sidecar.stat().st_size > 4096:
+        raise UpdateError('SHA-256 校验文件过大。')
+    fields = sidecar.read_text(encoding='utf-8-sig').strip().split(maxsplit=1)
+    if not fields or not re.fullmatch('[a-fA-F0-9]{64}', fields[0]):
+        raise UpdateError('SHA-256 校验文件内容无效。')
+    if len(fields) == 2 and fields[1].lstrip('*') != package.name:
+        raise UpdateError('SHA-256 校验文件中的包名不匹配。')
+    return fields[0].lower()
+
+
 def inspect_package(path: Path, expected_sha256: str = '') -> Package:
     path = safe_path(path)
     if not path.is_file() or path.suffix.lower() != '.zip':
         raise UpdateError('请选择完整的 OMG-Neo ZIP 分发包。')
-    if not expected_sha256:
-        sidecar = path.with_suffix('.zip.sha256')
-        if sidecar.exists():
-            safe_path(sidecar)
-            if sidecar.stat().st_size > 4096:
-                raise UpdateError('SHA-256 校验文件过大。')
-            fields = sidecar.read_text(encoding='utf-8-sig').strip().split(maxsplit=1)
-            if not fields:
-                raise UpdateError('SHA-256 校验文件为空。')
-            expected_sha256 = fields[0]
-            if len(fields) == 2 and fields[1].lstrip('*') != path.name:
-                raise UpdateError('SHA-256 校验文件中的包名不匹配。')
+    expected_sha256 = resolve_sha256(expected_sha256, path)
     actual_hash = digest(path)
     if expected_sha256 and (not re.fullmatch('[a-fA-F0-9]{64}', expected_sha256)
                             or actual_hash != expected_sha256.lower()):
@@ -308,12 +329,24 @@ class Updater:
 
     def _copy(self, source: Path, destination: Path):
         safe_tree(source)
+        def copy_file(original, copied):
+            original, copied = Path(original), Path(copied)
+            total, done = original.stat().st_size, 0
+            detail = str(original.relative_to(source.parent))
+            self.progress('复制文件', detail, 0, total)
+            with original.open('rb') as reader, copied.open('wb') as writer:
+                while chunk := reader.read(1024 * 1024):
+                    writer.write(chunk)
+                    done += len(chunk)
+                    self.progress('复制文件', detail, done, total)
+            shutil.copystat(original, copied)
+            return str(copied)
         if source.is_dir():
             def ignore(directory, names):
                 return ['.backend.lock'] if source.name.lower() == 'appdata' and Path(directory) == source else []
-            shutil.copytree(source, destination, ignore=ignore)
+            shutil.copytree(source, destination, ignore=ignore, copy_function=copy_file)
         else:
-            shutil.copy2(source, destination)
+            copy_file(source, destination)
 
     def _preserve(self, stage: Path):
         for source in self.target.iterdir():
@@ -324,7 +357,12 @@ class Updater:
                 for file in originals:
                     if file.is_file() and not (source.name.lower() == 'appdata' and file == source / '.backend.lock'):
                         copied = stage / file.relative_to(self.target)
-                        if digest(file) != digest(copied):
+                        detail = file.relative_to(self.target).as_posix()
+                        original_hash = digest(file, lambda done, total: self.progress(
+                            '校验原用户数据', detail, done, total))
+                        copied_hash = digest(copied, lambda done, total: self.progress(
+                            '校验已保存数据', detail, done, total))
+                        if original_hash != copied_hash:
                             raise UpdateError(f'用户数据复制校验失败：{file}')
 
     def _space(self, size: int):
