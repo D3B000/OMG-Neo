@@ -81,7 +81,7 @@ class UpdaterTests(unittest.TestCase):
         work = self.updater.apply(self.zip)
         self.assertEqual((self.target / 'omg_neo.exe').read_bytes(), pe(b'new'))
         self.assertEqual((work / 'backup/omg_neo.exe').read_bytes(), pe(b'old'))
-        self.assertEqual((self.target / 'AppData/config.json').read_bytes(), (work / 'backup/AppData/config.json').read_bytes())
+        self.assertFalse((work / 'backup/AppData').exists())
         self.assertEqual((self.target / 'ui-reviews/notes.json').read_text(), 'my review')
         self.assertEqual((self.target / 'custom.txt').read_text(), 'keep me')
         self.assertFalse((self.target / 'obsolete.dll').exists())
@@ -96,13 +96,13 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual((self.target / 'omg_neo.exe').read_bytes(), pe(b'old'))
         self.assertEqual((self.target / 'AppData/config.json').read_text(), 'new user settings')
         self.assertEqual((rollback / 'backup/omg_neo.exe').read_bytes(), pe(b'new'))
-        self.assertEqual((work / 'backup/AppData/config.json').read_text(), '{"theme":"dark"}')
+        self.assertFalse((work / 'backup/AppData').exists())
 
     def test_stage_rename_failure_restores_whole_old_install(self):
         original = Path.rename
 
         def fail(path, destination):
-            if path.name == 'stage' and Path(destination) == self.target:
+            if path.parent.name == 'stage' and path.name == 'backend':
                 raise PermissionError('simulated occupied destination')
             return original(path, destination)
 
@@ -112,47 +112,49 @@ class UpdaterTests(unittest.TestCase):
         self.assert_original()
         self.assertEqual(self.updater.transactions()[0][1]['state'], 'rolled_back')
 
-    def test_userdata_copy_failure_never_switches(self):
-        with patch.object(self.updater, '_copy', side_effect=OSError('disk full')):
-            with self.assertRaises(OSError):
-                self.updater.apply(self.zip)
+    def test_userdata_and_updater_are_never_opened_or_moved(self):
+        (self.target / 'OMG-Neo-Updater.exe').write_bytes(b'updater')
+        (self.target / 'AppData/large.bin').write_bytes(b'x' * 2097152)
+        entries = [self.target / name for name in ('AppData', 'ui-reviews', 'custom.txt', 'OMG-Neo-Updater.exe')]
+        identity = {p: p.stat().st_ino for p in entries}
+        real_open, real_rename, real_walk = Path.open, Path.rename, os.walk
+        def guard_open(path, *args, **kwargs):
+            if (path == self.target / 'AppData/large.bin' or path in entries):
+                raise AssertionError(f'User data accessed: {path}')
+            return real_open(path, *args, **kwargs)
+        def guard_rename(path, destination):
+            if path == self.target or path in entries:
+                raise AssertionError(f'User path moved: {path}')
+            return real_rename(path, destination)
+        def guard_walk(path, *args, **kwargs):
+            if Path(path) in entries:
+                raise AssertionError(f'User tree scanned: {path}')
+            return real_walk(path, *args, **kwargs)
+        with patch.object(Path, 'open', guard_open), patch.object(Path, 'rename', guard_rename), patch('os.walk', guard_walk):
+            work = self.updater.apply(self.zip)
+            self.updater.rollback(work)
+        self.assertEqual({p: p.stat().st_ino for p in entries}, identity)
         self.assert_original()
-        self.assertEqual(self.updater.transactions()[0][1]['state'], 'aborted')
 
-    def test_userdata_copy_hash_detects_corruption(self):
-        original = self.updater._copy
-        def corrupt(source, destination):
-            original(source, destination)
-            if source.name == 'custom.txt':
-                destination.write_text('corrupt copy')
-        with patch.object(self.updater, '_copy', corrupt):
-            with self.assertRaisesRegex(UpdateError, '复制校验失败'):
-                self.updater.apply(self.zip)
-        self.assert_original()
-
-    def test_userdata_large_file_reports_copy_and_both_hashes(self):
-        data = b'x' * (2 * 1024 * 1024 + 17)
-        (self.target / 'AppData/large.bin').write_bytes(data)
-        events = []
-        self.updater.progress = lambda *event: events.append(event)
-        self.updater.apply(self.zip)
-        self.assertEqual((self.target / 'AppData/large.bin').read_bytes(), data)
-        for stage in ('复制文件', '校验原用户数据', '校验已保存数据'):
-            reports = [e for e in events if e[0] == stage and e[1].endswith('large.bin')]
-            self.assertTrue(any(0 < e[2] < e[3] for e in reports), stage)
-            self.assertEqual(reports[-1][2:], (len(data), len(data)))
-        self.assertFalse((self.target / 'AppData/.backend.lock').exists())
-
-    def test_cancel_during_userdata_copy_preserves_original(self):
-        (self.target / 'AppData/large.bin').write_bytes(b'x' * (2 * 1024 * 1024))
-        def cancel(stage, detail, done=0, total=0):
-            if stage == '复制文件' and detail.endswith('large.bin') and done:
-                raise KeyboardInterrupt()
-        self.updater.progress = cancel
-        with self.assertRaises(KeyboardInterrupt):
-            self.updater.apply(self.zip)
-        self.assert_original()
-        self.assertEqual(self.updater.transactions()[0][1]['state'], 'aborted')
+    def test_failures_at_each_program_rename_restore_old_program(self):
+        # Inject one failure at each old->backup / stage->target boundary.
+        old_count = sum(1 for p in self.target.iterdir() if p.name not in {'AppData', 'ui-reviews', 'custom.txt'})
+        new_count = len(list(self.source.iterdir()))
+        real_rename = Path.rename
+        for fail_at in range(1, old_count + new_count + 1):
+            count = 0
+            def fail(path, destination):
+                nonlocal count
+                if Path(destination).parent.name == 'backup' or path.parent.name == 'stage':
+                    count += 1
+                    if count == fail_at:
+                        raise OSError('injected rename failure')
+                return real_rename(path, destination)
+            with self.subTest(fail_at=fail_at), patch.object(Path, 'rename', fail):
+                with self.assertRaises(OSError):
+                    self.updater.apply(self.zip)
+            self.assert_original()
+            self.assertEqual((self.target / 'obsolete.dll').read_bytes(), b'obsolete')
 
     def test_explicit_sha_file_and_alternate_sidecar(self):
         checksum = digest(self.zip)
@@ -174,6 +176,7 @@ class UpdaterTests(unittest.TestCase):
         from main import TUI
         from unittest.mock import Mock
         updater, package = Mock(), Mock()
+        updater.target = self.target
         package.path, package.sha256 = self.zip, 'reviewed'
         updater.apply.return_value = self.root
         tui = TUI()
@@ -220,7 +223,7 @@ class UpdaterTests(unittest.TestCase):
         self.updater.progress = progress
         work = self.updater.apply(self.zip)
         self.assertEqual(checks, [True])
-        with exclusive_lock(work / 'backup/AppData/.backend.lock'):
+        with exclusive_lock(self.target / 'AppData/.backend.lock'):
             pass
 
     def test_ctrl_c_before_switch_preserves_original(self):
@@ -387,11 +390,52 @@ Updater(Path(sys.argv[1]), progress, process_check=lambda _: []).apply(Path(sys.
 '''
         child = subprocess.run([sys.executable, '-c', code, str(self.target), str(self.zip)], cwd=ROOT)
         self.assertEqual(child.returncode, 93)
-        self.assertFalse(self.target.exists())
+        self.assertTrue(self.target.is_dir())
         work, record = self.updater.transactions()[0]
         self.assertEqual(record['state'], 'backup_ready')
         self.updater.recover(work)
         self.assert_original()
+
+    def test_process_death_after_partial_replacement_recovers_in_place(self):
+        code = '''
+import os, sys
+from pathlib import Path
+from engine import Updater
+def progress(stage, detail, done=0, total=0):
+    if stage == sys.argv[3] and done == 2: os._exit(94)
+Updater(Path(sys.argv[1]), progress, process_check=lambda _: []).apply(Path(sys.argv[2]))
+'''
+        identity = (self.target / 'AppData').stat().st_ino
+        for stage in ('备份旧版本', '替换程序'):
+            child = subprocess.run([sys.executable, '-c', code, str(self.target), str(self.zip), stage], cwd=ROOT)
+            self.assertEqual(child.returncode, 94)
+            work, record = self.updater.transactions()[0]
+            self.updater.recover(work)
+            self.assert_original()
+            self.assertEqual((self.target / 'AppData').stat().st_ino, identity)
+
+    def test_bundle_queues_updater_without_overwriting_running_copy(self):
+        old = self.target / 'OMG-Neo-Updater.exe'
+        old.write_bytes(pe(b'old-updater'))
+        incoming = self.source / 'OMG-Neo-Updater.exe'
+        incoming.write_bytes(pe(b'new-updater'))
+        incoming.with_suffix('.exe.sha256').write_text(digest(incoming) + '  OMG-Neo-Updater.exe')
+        write_manifest(self.source, '0.0.2+2', 'Release')
+        archive(self.source, self.zip)
+        self.updater.apply(self.zip)
+        self.assertEqual(old.read_bytes(), pe(b'old-updater'))
+        pending = self.target / '.updater-pending'
+        self.assertEqual((pending / 'OMG-Neo-Updater.exe').read_bytes(), incoming.read_bytes())
+        self.assertEqual(validate_payload(self.target)['version'], '0.0.2+2')
+        with patch.object(sys, 'path', [str(ROOT.parent / 'backend'), *sys.path]):
+            from updater_handoff import apply_pending_updater
+        self.assertTrue(apply_pending_updater(self.target))
+        self.assertEqual(old.read_bytes(), pe(b'new-updater'))
+        self.assertFalse((pending / 'manifest.json').exists())
+        self.assert_original_userdata()
+
+    def assert_original_userdata(self):
+        self.assertEqual((self.target / 'AppData/config.json').read_text(), '{"theme":"dark"}')
 
     def test_interruption_after_new_directory_rename_is_recoverable(self):
         self.updater.workspace.mkdir()
@@ -417,15 +461,14 @@ Updater(Path(sys.argv[1]), progress, process_check=lambda _: []).apply(Path(sys.
                 self.updater.apply(self.zip)
         self.assert_original()
 
-    def test_link_in_userdata_is_rejected_without_following(self):
+    def test_link_in_excluded_userdata_is_not_followed(self):
         outside = self.root / 'external'
         outside.mkdir()
         try:
             (self.target / 'AppData/link').symlink_to(outside, target_is_directory=True)
         except OSError:
             self.skipTest('Windows symlink privilege unavailable')
-        with self.assertRaises(UpdateError):
-            self.updater.apply(self.zip)
+        self.updater.apply(self.zip)
         self.assertEqual(list(outside.iterdir()), [])
 
     def release_data(self):
@@ -481,6 +524,19 @@ Updater(Path(sys.argv[1]), progress, process_check=lambda _: []).apply(Path(sys.
         self.assertFalse(same_version('0.0.2+2', 'v0.0.2+3'))
         self.assertFalse(same_version('未附版本清单', 'v0.0.2'))
         self.assertFalse(same_version('0.0.1+1', 'v0.0.2'))
+
+    def test_download_progress_is_bar_and_verification_has_own_stage(self):
+        from main import TUI
+        import io
+        output = io.StringIO()
+        tui = TUI()
+        with patch('sys.stdout', output):
+            tui.progress('下载', 'OMG-Neo.zip', 1, 2)
+            tui.progress('校验下载包', 'OMG-Neo.zip', 0, 2)
+        self.assertIn('############------------', output.getvalue())
+        self.assertIn('50.0%', output.getvalue())
+        self.assertIn('校验下载包', output.getvalue())
+        self.assertNotIn('0.0 / 0.0', output.getvalue())
 
     @unittest.skipUnless(os.name == 'nt', 'Windows process API')
     def test_process_scanner_finds_own_python(self):

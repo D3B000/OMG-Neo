@@ -6,7 +6,7 @@
 
 [使用说明](intro.md) · [手动构建指南](omg_neo/docs/手动构建指南.md) · [Agent 构建流程](omg_neo/docs/Agent构建流程.md)
 
-本体更新可使用独立的 [TUI Updater](updater/README.md)：查询并下载 GitHub 最新正式版本，或手动添加 ZIP；保留用户数据，完整备份旧目录，并支持失败恢复与程序回退。
+完整应用包已附带 [TUI Updater](updater/README.md)，解压后可直接运行根目录的 `OMG-Neo-Updater.exe`：查询并下载 GitHub 最新正式版本，或手动添加 ZIP。更新仅替换程序文件，用户数据留在原位；旧程序进入备份，支持中断恢复和程序回退。更新器新副本由应用下次启动时交接替换，Release 无需单独下载更新器。
 
 ![OMG-Neo 浅色首页](docs/screenshots/home.png)
 

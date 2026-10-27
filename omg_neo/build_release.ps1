@@ -52,6 +52,11 @@ Get-ChildItem -LiteralPath $releaseRoot -Force |
   } |
   Copy-Item -Destination $packageRoot -Recurse -Force
 & (Join-Path (Split-Path $appRoot) 'backend\build.ps1') -Python $Python -Output (Join-Path $packageRoot 'backend')
+& (Join-Path (Split-Path $appRoot) 'updater\build.ps1') -Python $Python
+if ($LASTEXITCODE -ne 0) { throw 'Updater 构建失败。' }
+$updaterDist = Join-Path (Split-Path $appRoot) 'updater\dist'
+Copy-Item -LiteralPath (Join-Path $updaterDist 'OMG-Neo-Updater.exe') -Destination $packageRoot
+Copy-Item -LiteralPath (Join-Path $updaterDist 'OMG-Neo-Updater.exe.sha256') -Destination $packageRoot
 # Keep local/offline update packages self-describing; the standalone updater also
 # accepts older ZIPs without this manifest after structural and PE checks.
 $versionLine = Get-Content -LiteralPath (Join-Path $appRoot 'pubspec.yaml') |

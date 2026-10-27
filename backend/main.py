@@ -51,6 +51,9 @@ def serve(args):
             lock.flush()
         lock.seek(0)
         msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+    if getattr(sys, 'frozen', False):
+        from updater_handoff import start_pending_updater
+        start_pending_updater(Path(sys.executable).resolve().parent.parent)
     if sys.stdout is None or sys.stdin is None or sys.stderr is None:
         raise RuntimeError("后端必须以 stdio 管道启动")
     # Reserve the protocol pipe, then redirect both the CRT fd and Win32's

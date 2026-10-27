@@ -592,9 +592,14 @@ def download_file_smart(url: str, dest_path: str, signals=None,
                             try:
                                 lo, hi = progress_range
                                 signals.progress.emit(float(lo + min(1, downloaded / total) * (hi - lo)))
-                                signals.status.emit(f"下载中... {downloaded / 1048576:.1f} / {total / 1048576:.1f} MB", "info")
+                                if hasattr(signals, 'download_bytes'):
+                                    signals.download_bytes.emit(downloaded, total)
+                                else:
+                                    signals.status.emit(f"下载中... {downloaded / 1048576:.1f} / {total / 1048576:.1f} MB", "info")
                             except Exception:
                                 pass
+                        if total and downloaded == total:
+                            break  # Content-Length reached; no extra blocking EOF read.
                         chunk = response.read(chunk_size)
                 if total and downloaded != total:
                     raise ValueError("下载未完成 (中断或长度不匹配)")

@@ -6,6 +6,7 @@ from ctypes import wintypes
 from contextlib import contextmanager
 from pathlib import Path
 import os
+import sys
 
 
 def inside(path: Path, parent: Path) -> bool:
@@ -54,6 +55,13 @@ def running_processes(target: Path) -> list[str]:
                     buffer = ctypes.create_unicode_buffer(32768)
                     length = wintypes.DWORD(len(buffer))
                     if kernel.QueryFullProcessImageNameW(process, 0, buffer, ctypes.byref(length)):
+                        # PyInstaller's bootloader and child share the same EXE.
+                        # Both can remain running in the excluded updater path.
+                        if (getattr(sys, 'frozen', False)
+                                and os.path.normcase(os.path.abspath(buffer.value)) ==
+                                os.path.normcase(os.path.abspath(sys.executable))):
+                            ok = kernel.Process32NextW(snapshot, ctypes.byref(entry))
+                            continue
                         if inside(Path(buffer.value), target):
                             found.append(f'{entry.szExeFile} (PID {entry.th32ProcessID})')
                     elif entry.szExeFile.lower() in {'omg_neo.exe', 'omg_backend.exe', 'omg_injector.exe'}:

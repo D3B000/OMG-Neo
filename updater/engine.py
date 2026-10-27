@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from contextlib import contextmanager, ExitStack
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable
@@ -20,6 +20,8 @@ import zipfile
 from platform_ops import exclusive_lock, inside, running_processes
 
 MANIFEST = 'update-manifest.json'
+UPDATER_EXE = 'OMG-Neo-Updater.exe'
+PENDING_UPDATER = '.updater-pending'
 MAX_BYTES = 8 * 1024**3
 MAX_FILES = 30000
 RESERVED = {'CON', 'PRN', 'AUX', 'NUL', *(f'COM{i}' for i in range(1, 10)),
@@ -69,10 +71,23 @@ def safe_tree(root: Path):
                 raise UpdateError(f'目录中存在链接，未操作：{path}')
 
 
+def safe_program(root: Path):
+    """Inspect only managed roots; user directories are never traversed."""
+    safe_path(root)
+    if root.exists():
+        for entry in root.iterdir():
+            if managed(entry.name):
+                safe_tree(entry)
+
+
 def managed(name: str) -> bool:
     lower = name.lower()
-    return lower in {'omg_neo.exe', 'data', 'backend', 'native_assets.json',
+    return lower in {'omg_neo.exe', 'data', 'backend', PENDING_UPDATER, 'native_assets.json',
                      'readme.txt', 'launch.ps1', MANIFEST} or lower.endswith(('.dll', '.pdb'))
+
+
+def bundled_updater(name: str) -> bool:
+    return name.lower() in {UPDATER_EXE.lower(), UPDATER_EXE.lower() + '.sha256'}
 
 
 def checked_name(name: str) -> tuple[str, ...]:
@@ -100,7 +115,7 @@ def verify_pe(path: Path):
             raise UpdateError(f'需要 Windows x64 程序：{path.name}')
 
 
-def validate_payload(root: Path, *, verify_manifest: bool = True) -> dict:
+def validate_payload(root: Path, *, verify_manifest: bool = True, progress=None) -> dict:
     for name in ('omg_neo.exe', 'flutter_windows.dll', 'backend/omg_backend.exe',
                  'backend/omg_injector.exe', 'data/icudtl.dat'):
         if not (root / name).is_file():
@@ -125,15 +140,22 @@ def validate_payload(root: Path, *, verify_manifest: bool = True) -> dict:
                 or not isinstance(manifest.get('version'), str)):
             raise UpdateError('更新清单产品、格式或模式不匹配。')
         expected = manifest.get('files')
-        actual = {p.relative_to(root).as_posix(): p for p in root.rglob('*')
-                  if p.is_file() and p.name != MANIFEST
-                  and managed(p.relative_to(root).parts[0])}
+        actual = {}
+        for entry in root.iterdir():
+            if managed(entry.name) and entry.name not in {MANIFEST, PENDING_UPDATER}:
+                for p in entry.rglob('*') if entry.is_dir() else [entry]:
+                    if p.is_file():
+                        actual[p.relative_to(root).as_posix()] = p
         if not isinstance(expected, dict) or set(expected) != set(actual):
             raise UpdateError('更新清单与包内文件不一致。')
+        total_bytes = sum(p.stat().st_size for p in actual.values())
+        checked = 0
         for name, path in actual.items():
             record = expected[name]
-            if record.get('size') != path.stat().st_size or record.get('sha256') != digest(path):
+            report = (lambda done, total: progress('校验程序文件', name, checked + done, total_bytes)) if progress else None
+            if record.get('size') != path.stat().st_size or record.get('sha256') != digest(path, report):
                 raise UpdateError(f'文件校验失败：{name}')
+            checked += path.stat().st_size
         metadata['version'] = manifest['version']
     return metadata
 
@@ -171,12 +193,12 @@ def resolve_sha256(value: str, package: Path) -> str:
     return fields[0].lower()
 
 
-def inspect_package(path: Path, expected_sha256: str = '') -> Package:
+def inspect_package(path: Path, expected_sha256: str = '', progress=None) -> Package:
     path = safe_path(path)
     if not path.is_file() or path.suffix.lower() != '.zip':
         raise UpdateError('请选择完整的 OMG-Neo ZIP 分发包。')
     expected_sha256 = resolve_sha256(expected_sha256, path)
-    actual_hash = digest(path)
+    actual_hash = digest(path, progress)
     if expected_sha256 and (not re.fullmatch('[a-fA-F0-9]{64}', expected_sha256)
                             or actual_hash != expected_sha256.lower()):
         raise UpdateError('更新包 SHA-256 不匹配。')
@@ -204,7 +226,8 @@ def inspect_package(path: Path, expected_sha256: str = '') -> Package:
             if parts[:len(prefix)] != prefix or len(parts) <= len(prefix):
                 raise UpdateError('ZIP 外目录含额外文件。')
             relative = parts[len(prefix):]
-            if not managed(relative[0]) or relative[0].lower().endswith('.pdb'):
+            if (relative[0].lower() == PENDING_UPDATER or relative[0].lower().endswith('.pdb')
+                    or not (managed(relative[0]) or bundled_updater(relative[0]))):
                 raise UpdateError(f'更新包含非程序文件或用户数据：{relative[0]}')
             if len(relative) > 1 and relative[0].lower() not in {'data', 'backend'}:
                 raise UpdateError(f'程序根文件不能是目录：{relative[0]}')
@@ -227,7 +250,7 @@ def inspect_package(path: Path, expected_sha256: str = '') -> Package:
 
 def write_manifest(root: Path, version: str, configuration: str):
     safe_tree(root)
-    if any(not managed(path.name) for path in root.iterdir()):
+    if any(not (managed(path.name) or bundled_updater(path.name)) for path in root.iterdir()):
         raise UpdateError('只能为不含用户数据的洁净分发目录生成清单。')
     # Producer operation: rebuild after final packaging metadata (README) changes.
     # Installation still verifies the existing manifest with the default True.
@@ -235,7 +258,8 @@ def write_manifest(root: Path, version: str, configuration: str):
     if metadata['configuration'] != configuration or not version.strip():
         raise UpdateError('清单模式与前端产物不一致，或版本为空。')
     files = {p.relative_to(root).as_posix(): {'size': p.stat().st_size, 'sha256': digest(p)}
-             for p in sorted(root.rglob('*')) if p.is_file() and p.name != MANIFEST}
+             for p in sorted(root.rglob('*')) if p.is_file() and p.name != MANIFEST
+             and managed(p.relative_to(root).parts[0])}
     atomic_json(root / MANIFEST, {'schema': 1, 'product': 'OMG-Neo', 'version': version,
                                 'configuration': configuration, 'files': files})
 
@@ -262,30 +286,34 @@ class Updater:
 
     def idle(self):
         if getattr(sys, 'frozen', False) and inside(Path(sys.executable), self.target):
-            raise UpdateError('请将更新器移到安装目录外，再运行。')
+            if managed(Path(sys.executable).absolute().relative_to(self.target).parts[0]):
+                raise UpdateError('更新器不能放在待替换的 backend 或 data 等程序目录内。')
         if inside(Path.cwd(), self.target):
-            raise UpdateError('请从安装目录外启动更新器，避免工作目录占用。')
+            relative = Path.cwd().relative_to(self.target)
+            if relative.parts and managed(relative.parts[0]):
+                raise UpdateError('请从 OMG-Neo 根目录或 updater 目录启动，避免占用程序目录。')
         running = self.process_check(self.target)
         if running:
             raise UpdateError('请正常退出以下程序后重试：\n' + '\n'.join(running))
 
     def current(self):
-        safe_tree(self.target)
+        safe_program(self.target)
         if not (self.target / 'omg_neo.exe').is_file() or not (self.target / 'backend').is_dir() or not (self.target / 'data').is_dir():
             raise UpdateError('目标不是完整的 OMG-Neo 安装目录。')
 
     def transactions(self) -> list[tuple[Path, dict]]:
-        safe_tree(self.workspace)
+        safe_path(self.workspace)
         result = []
         if self.workspace.exists():
             for path in sorted(self.workspace.glob('*/journal.json'), reverse=True):
+                safe_path(path)
                 if path.stat().st_size > 65536:
                     raise UpdateError('更新记录过大。')
                 record = json.loads(path.read_text(encoding='utf-8'))
                 if record.get('target') != str(self.target):
                     raise UpdateError(f'更新记录目标不匹配：{path}')
                 result.append((path.parent, record))
-        return result
+        return sorted(result, key=lambda item: str(item[1].get('created', item[0].name)), reverse=True)
 
     def _locked(self):
         safe_path(self.workspace)
@@ -301,16 +329,10 @@ class Updater:
             data = self.target / 'AppData'
             data.mkdir(exist_ok=True)
             safe_path(data / '.backend.lock')
-            # Same byte lock as the default-data-root service, held while copying
-            # data. Windows forbids renaming a directory with open descendants;
-            # release it just before the final process check and directory swap.
-            with ExitStack() as service_guard:
-                service_guard.enter_context(exclusive_lock(data / '.backend.lock'))
-                self._release_service = service_guard.close
-                try:
-                    yield
-                finally:
-                    self._release_service = None
+            # Keep the backend lock throughout the program-only replacement.
+            # AppData and the installation directory themselves never move.
+            with exclusive_lock(data / '.backend.lock'):
+                yield
 
     def _new(self, action: str) -> tuple[Path, dict]:
         pending = [p.name for p, r in self.transactions() if r['state'] not in TERMINAL]
@@ -342,54 +364,92 @@ class Updater:
             shutil.copystat(original, copied)
             return str(copied)
         if source.is_dir():
-            def ignore(directory, names):
-                return ['.backend.lock'] if source.name.lower() == 'appdata' and Path(directory) == source else []
-            shutil.copytree(source, destination, ignore=ignore, copy_function=copy_file)
+            shutil.copytree(source, destination, copy_function=copy_file)
         else:
             copy_file(source, destination)
 
-    def _preserve(self, stage: Path):
-        for source in self.target.iterdir():
-            if not managed(source.name):
-                self.progress('保留用户数据', source.name)
-                self._copy(source, stage / source.name)
-                originals = source.rglob('*') if source.is_dir() else [source]
-                for file in originals:
-                    if file.is_file() and not (source.name.lower() == 'appdata' and file == source / '.backend.lock'):
-                        copied = stage / file.relative_to(self.target)
-                        detail = file.relative_to(self.target).as_posix()
-                        original_hash = digest(file, lambda done, total: self.progress(
-                            '校验原用户数据', detail, done, total))
-                        copied_hash = digest(copied, lambda done, total: self.progress(
-                            '校验已保存数据', detail, done, total))
-                        if original_hash != copied_hash:
-                            raise UpdateError(f'用户数据复制校验失败：{file}')
-
     def _space(self, size: int):
-        preserved = sum(p.stat().st_size for p in self.target.rglob('*')
-                        if p.is_file() and not managed(p.relative_to(self.target).parts[0]))
-        required = size + preserved + 64 * 1024**2
+        required = size + 64 * 1024**2
         if shutil.disk_usage(self.target.parent).free < required:
             raise UpdateError(f'磁盘空间不足，暂存至少需要 {required / 1024**2:.1f} MiB。')
 
+    def _queue_updater(self, stage: Path):
+        executable = next((p for p in stage.iterdir() if p.name.lower() == UPDATER_EXE.lower()), None)
+        if executable is None:
+            return
+        verify_pe(executable)
+        checksum = digest(executable, lambda done, total:
+                          self.progress('暂存新版更新器', UPDATER_EXE, done, total))
+        sidecar = next((p for p in stage.iterdir() if p.name.lower() == (UPDATER_EXE + '.sha256').lower()), None)
+        if sidecar:
+            if resolve_sha256(str(sidecar), executable) != checksum:
+                raise UpdateError('随包更新器 SHA-256 不匹配。')
+            sidecar.unlink()
+        pending = stage / PENDING_UPDATER
+        pending.mkdir()
+        executable.rename(pending / UPDATER_EXE)
+        atomic_json(pending / 'manifest.json', {'schema': 1, 'sha256': checksum})
+
     def _switch(self, work: Path, record: dict):
-        if self._release_service:
-            self._release_service()
         self.idle()
-        safe_tree(self.target)
+        safe_program(self.target)
         safe_tree(work / 'stage')
+        record['strategy'] = 'program-only'
+        record['old_entries'] = sorted(p.name for p in self.target.iterdir() if managed(p.name))
+        record['new_entries'] = sorted(p.name for p in (work / 'stage').iterdir())
+        self._program_entries(record)
+        backup = work / 'backup'
+        # Persist both lists BEFORE any rename. Recovery also works when a
+        # process dies between a rename and the next journal write.
         self._save(work, record, 'switching')
-        self.progress('备份旧版本', str(work / 'backup'))
-        self.target.rename(work / 'backup')
+        backup.mkdir()
+        for index, name in enumerate(record['old_entries'], 1):
+            self.progress('备份旧版本', name, index, len(record['old_entries']))
+            (self.target / name).rename(backup / name)
         self._save(work, record, 'backup_ready')
-        self.progress('替换程序', str(self.target))
-        (work / 'stage').rename(self.target)
+        for index, name in enumerate(record['new_entries'], 1):
+            self.progress('替换程序', name, index, len(record['new_entries']))
+            (work / 'stage' / name).rename(self.target / name)
         self._save(work, record, 'installed')
+
+    @staticmethod
+    def _program_entries(record):
+        for field in ('old_entries', 'new_entries'):
+            entries = record.get(field)
+            if (not isinstance(entries, list) or len(entries) > MAX_FILES
+                    or any(not isinstance(n, str) or len(checked_name(n)) != 1
+                           or not managed(n) for n in entries)
+                    or len({n.casefold() for n in entries}) != len(entries)):
+                raise UpdateError('程序替换事务中的路径无效。')
+
+    def _recover_program(self, work: Path, record: dict):
+        self._program_entries(record)
+        safe_program(self.target)
+        for name in ('stage', 'backup', 'failed-install'):
+            safe_tree(work / name)
+        failed = work / 'failed-install'
+        failed.mkdir(exist_ok=True)
+        # A missing staged entry means it was installed. An existing failed
+        # entry means recovery already removed it (and may have restored old).
+        for name in record['new_entries']:
+            target = self.target / name
+            if not (work / 'stage' / name).exists() and not (failed / name).exists() and target.exists():
+                target.rename(failed / name)
+        for name in record['old_entries']:
+            original = work / 'backup' / name
+            if original.exists():
+                if (self.target / name).exists():
+                    raise UpdateError(f'恢复路径冲突，请保留现场：{name}')
+                original.rename(self.target / name)
+            elif not (self.target / name).exists():
+                raise UpdateError(f'原程序及备份均缺失：{name}')
+        self._save(work, record, 'rolled_back')
 
     def apply(self, archive: Path, expected_sha256: str = '', *, reviewed_sha256: str = '') -> Path:
         with self._operation():
             self.progress('校验更新包', str(archive))
-            package = inspect_package(archive, expected_sha256)
+            package = inspect_package(archive, expected_sha256, lambda done, total:
+                                      self.progress('校验更新包', archive.name, done, total))
             if reviewed_sha256 and package.sha256 != reviewed_sha256:
                 raise UpdateError('预览后更新包已变化，请重新检查并确认。')
             self._space(package.size)
@@ -408,9 +468,9 @@ class Updater:
                         self.progress('解压更新包', relative, index + 1, len(package.files))
                 if digest(package.path) != package.sha256:
                     raise UpdateError('校验后 ZIP 已变化，更新已停止。')
-                metadata = validate_payload(stage)
+                metadata = validate_payload(stage, progress=self.progress)
                 record.update(metadata)
-                self._preserve(stage)
+                self._queue_updater(stage)
                 self._save(work, record, 'ready')
                 self._switch(work, record)
             except BaseException:
@@ -424,10 +484,11 @@ class Updater:
             transaction = Path(transaction)
             old = records.get(transaction)
             if not old or old['state'] != 'installed' or not (transaction / 'backup').is_dir():
-                raise UpdateError('请选择有完整旧目录备份的已完成事务。')
+                raise UpdateError('请选择有旧程序备份的已完成事务。')
             source = transaction / 'backup'
-            safe_tree(source)
-            size = sum(p.stat().st_size for p in source.rglob('*') if p.is_file())
+            safe_program(source)
+            size = sum(p.stat().st_size for entry in source.iterdir() if managed(entry.name)
+                       for p in (entry.rglob('*') if entry.is_dir() else [entry]) if p.is_file())
             self._space(size)
             work, record = self._new('rollback')
             record['from_transaction'] = transaction.name
@@ -437,8 +498,7 @@ class Updater:
                 for path in source.iterdir():
                     if managed(path.name) and not path.name.lower().endswith('.pdb'):
                         self._copy(path, stage / path.name)
-                record.update(validate_payload(stage))
-                self._preserve(stage)  # Keep CURRENT user data, never rewind their settings/workspace.
+                record.update(validate_payload(stage, progress=self.progress))
                 self._save(work, record, 'ready')
                 self._switch(work, record)
             except BaseException:
@@ -455,15 +515,19 @@ class Updater:
             self._recover(Path(transaction), record)
 
     def _recover(self, work: Path, record: dict):
+        if record.get('strategy') == 'program-only':
+            self._recover_program(work, record)
+            return
         safe_tree(work)
-        safe_tree(self.target)
         backup = work / 'backup'
         if backup.exists():
+            safe_tree(self.target)  # Legacy whole-directory transactions only.
             if self.target.exists():
                 self.target.rename(work / 'failed-install')
             backup.rename(self.target)
             self._save(work, record, 'rolled_back')
         elif self.target.exists():
+            safe_program(self.target)
             self._save(work, record, 'aborted')
         else:
             raise UpdateError(f'目标和备份均不存在，请保留现场手动恢复：{work}')

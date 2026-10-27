@@ -11,7 +11,7 @@ import sys
 if not getattr(sys, 'frozen', False):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'OMGLite/src'))
 from omg.core import download
-from engine import UpdateError, digest, inspect_package, preview_payload, safe_path
+from engine import UpdateError, inspect_package, preview_payload, safe_path
 
 REPOSITORY = 'D3B000/OMG-Neo'
 
@@ -42,10 +42,12 @@ class UpdateSource(Protocol):
 
 
 class GitHubSource:
-    def __init__(self, repository: str = REPOSITORY, status=print):
+    def __init__(self, repository: str = REPOSITORY, status=print, progress=None):
         if not re.fullmatch(r'[\w.-]+/[\w.-]+', repository):
             raise ValueError('GitHub 仓库名称无效。')
         self.repository, self.status = repository, status
+        self.progress = progress or (lambda stage, detail, done=0, total=0: None)
+        self.package = None
 
     def _status(self, label, *_):
         self.status(f'连接 GitHub：{label}')
@@ -118,20 +120,24 @@ class GitHubSource:
         class Signals:
             status = Signal(lambda message, *_: self.status(message))
             progress = Signal(lambda value: None)
+            download_bytes = Signal(lambda done, total: self.progress('下载', release.asset_name, done, total))
+        self.progress('下载', '连接下载源…')
         success, error = download.download_file_smart(release.url, str(partial), signals=Signals())
         if not success:
             raise UpdateError(error)
         try:
             if release.size and partial.stat().st_size != release.size:
                 raise UpdateError('Release 下载大小不匹配。')
-            if release.sha256 and digest(partial) != release.sha256:
-                raise UpdateError('Release SHA-256 不匹配。')
             partial.replace(final)
-            metadata = preview_payload(inspect_package(final, release.sha256))
+            self.progress('校验下载包', '网络传输完成，正在读取 ZIP…')
+            package = inspect_package(final, release.sha256, lambda done, total:
+                                      self.progress('校验下载包', release.asset_name, done, total))
+            metadata = preview_payload(package)
             if metadata['configuration'] != release.configuration:
                 raise UpdateError('下载包的前端模式与 Release 不匹配。')
             if not same_version(metadata['version'], release.version):
                 raise UpdateError('下载包版本清单与 Release 标签不匹配。')
+            self.package = package
         except Exception:
             partial.unlink(missing_ok=True)
             final.unlink(missing_ok=True)

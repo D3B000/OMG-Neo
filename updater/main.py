@@ -40,6 +40,8 @@ class TUI:
         self.target, self.package, self.sha256 = target, package, sha256
         self.last_progress = 0.0
         self.last_stage = ''
+        self.prepared_package = None
+        self.exit_after_update = False
         self.ansi = False
         if os.name == 'nt' and sys.stdout.isatty():
             kernel = ctypes.WinDLL('kernel32', use_last_error=True)
@@ -68,11 +70,16 @@ class TUI:
 
     def progress(self, stage: str, detail: str, done: int = 0, total: int = 0):
         now = time.monotonic()
-        if stage == self.last_stage and now - self.last_progress < .1:
+        if stage == self.last_stage and (not total or done != total) and now - self.last_progress < .1:
             return
         self.last_progress = now
         self.last_stage = stage
-        suffix = f' [{done}/{total}]' if total else ''
+        if total:
+            fraction = min(1, max(0, done / total))
+            fill = int(fraction * 24)
+            suffix = f' [{"#" * fill}{"-" * (24 - fill)}] {fraction:6.1%}'
+        else:
+            suffix = ' [等待响应…]' if stage == '下载' else ''
         # Short enough for the default console; full paths remain in the journal.
         print('\r' + clean(f'  {stage}{suffix}  {detail}')[:100].ljust(100), end='', flush=True)
 
@@ -87,7 +94,14 @@ class TUI:
         updater.idle()
         if not self.package:
             raise ValueError('请先添加本地更新 ZIP。')
-        package = inspect_package(local_package(self.package), self.sha256.strip())
+        path = local_package(self.package).absolute()
+        cached = self.prepared_package
+        stamp = lambda p: (p.stat().st_size, p.stat().st_mtime_ns, p.stat().st_ctime_ns)
+        if cached and cached[0].path == path and cached[1] == stamp(path) and cached[2] == self.sha256:
+            package = cached[0]
+        else:
+            package = inspect_package(path, self.sha256.strip(), lambda done, total:
+                                      self.progress('校验更新包', path.name, done, total))
         metadata = preview_payload(package)
         self.screen('04 / 更新预览')
         print('  安装目录：' + clean(updater.target))
@@ -106,21 +120,26 @@ class TUI:
 
     def update(self):
         updater, package = self.inspect()
-        print('\n  旧安装目录会完整保存在备份中，不自动清理。')
+        print('\n  备份旧程序；AppData 和其他用户数据保留原位，不复制。')
         if input('  按回车开始更新，输入其他内容后回车返回：') != '':
             return
         self.screen('05 / 正在更新 · 准备阶段可 Ctrl+C 取消')
         work = updater.apply(package.path, self.sha256.strip(), reviewed_sha256=package.sha256)
         print('\n\n  更新完成。安装路径保持不变。')
-        print('  旧版完整备份：' + clean(work / 'backup'))
+        print('  旧程序备份：' + clean(work / 'backup'))
         print('  可直接从原目录启动 OMG-Neo；更新器不会自动启动游戏或应用。')
+        if (updater.target / '.updater-pending' / 'manifest.json').is_file():
+            print('  新版更新器已暂存；下次启动 OMG-Neo 时静默替换。更新器现在退出。', flush=True)
+            self.exit_after_update = True
+            return
         input('\n  按回车返回菜单…')
 
     def github(self):
         updater = self.updater()
         updater.current()
         current = validate_payload(updater.target)
-        source = GitHubSource(status=lambda message: print('  ' + clean(message)))
+        source = GitHubSource(status=lambda message: print('\n  ' + clean(message), flush=True),
+                              progress=self.progress)
         self.screen('07 / GitHub 最新版本')
         # Official portable releases are Release builds, including for Debug installations.
         release = source.check_latest('Release')
@@ -132,6 +151,9 @@ class TUI:
             return
         package = source.fetch_release(release, updater.workspace / 'downloads')
         self.package, self.sha256 = str(package), release.sha256
+        if source.package is not None:
+            stat = package.stat()
+            self.prepared_package = (source.package, (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns), self.sha256)
         self.update()
 
     def recovery(self):
@@ -192,6 +214,8 @@ class TUI:
                     self.recovery()
                 elif choice == '7':
                     self.github()
+                if self.exit_after_update:
+                    return 0
             except EOFError:
                 return 0
             except KeyboardInterrupt:

@@ -227,6 +227,18 @@ class RoutingTest(unittest.TestCase):
             self.assertTrue(d.download_file_smart(FILE, str(dest))[0])
             self.assertEqual(dest.read_bytes(), b'abcdef')
 
+    def test_known_length_finishes_without_an_extra_eof_read(self):
+        class NoEOF(Response):
+            def read(self, size=-1):
+                raise AssertionError('Should not wait for EOF after Content-Length')
+            def read1(self, size):
+                return io.BytesIO.read(self, size)
+        self.use(lambda req: NoEOF(b'abc', headers={'Content-Length': '3'}))
+        with tempfile.TemporaryDirectory() as temp:
+            dest = Path(temp) / 'file.zip'
+            self.assertTrue(d.download_file_smart(FILE, str(dest))[0])
+            self.assertEqual(dest.read_bytes(), b'abc')
+
     def test_416_requires_confirmed_length(self):
         def request(req):
             raise urllib.error.HTTPError(req.full_url, 416, 'Range Not Satisfiable',

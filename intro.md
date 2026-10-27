@@ -1,6 +1,6 @@
 # OMG-Neo 使用指南
 
-适用版本：**v0.0.1** · 平台：**Windows 10 / 11 x64** · 核对日期：**2026-10-26**
+适用版本：**v0.0.3** · 平台：**Windows 10 / 11 x64** · 核对日期：**2026-10-27**
 
 OMG-Neo 用于管理 GIMI / 3DMigoto：检查组件更新、启动游戏、整理模组、构建和处理 DLL，以及切换原神客户端服务器。第一次使用，先完成下面的「首次运行」，其余章节可以按需查阅。
 
@@ -18,6 +18,8 @@ OMG-Neo 用于管理 GIMI / 3DMigoto：检查组件更新、启动游戏、整�
 ```text
 OMG-Neo/
 ├── omg_neo.exe
+├── OMG-Neo-Updater.exe      # 随包更新器，可直接从根目录运行
+├── OMG-Neo-Updater.exe.sha256
 ├── data/、其他运行时 DLL
 ├── backend/
 │   ├── omg_backend.exe
@@ -292,6 +294,17 @@ AppData/server-switch/替换包/
 
 ### 升级或换目录时怎么保留数据
 
+**原目录升级优先使用随包更新器：**
+
+1. 正常关闭 OMG-Neo，等待后端与注入端退出。
+2. 在安装根目录运行 `OMG-Neo-Updater.exe`，选择当前安装目录。不要将更新器放进 `backend` 或 `data`。
+3. 使用菜单 7 查询并下载最新正式版，或用菜单 2 添加本地完整 ZIP；查看预览后，按提示输入 `UPDATE` 确认。
+4. 更新完成后，更新器自动退出。再次运行 `omg_neo.exe`，后台会校验并交接新版更新器；遇到占用时会等待并重试，仍未完成则留待下次启动。
+
+更新只替换受管理的程序文件，`AppData`、导出文件等用户数据保持原位，不扫描或复制其内容；旧程序备份不等于用户数据备份。当前正在运行的更新器也不会直接覆盖，新副本先暂存在 `.updater-pending/`。有未完成事务时，先在菜单 6 恢复；回退只恢复程序，用户数据保持当前状态。详细规则见 [更新器说明](updater/README.md)。
+
+**需要迁移到新目录或手动升级时：**
+
 1. 等待任务完成后正常关闭应用，确认没有未完成切服需要恢复。
 2. 备份原应用的 `AppData`。GIMI、Mods 和游戏目录独立备份，它们不包含在 AppData 中。
 3. 将新版本解压到新目录，再在应用关闭时迁移数据。跨版本配置兼容情况以对应版本说明为准。
@@ -363,7 +376,7 @@ python -m unittest discover -s ../backend/tests -p 'test_*.py'
 
 构建脚本使用 `--no-pub`，首次构建前必须先准备 Flutter 依赖。输出位于 `omg_neo/dist/<PackageName>/`，目标目录须不存在。
 
-只执行 `flutter build windows` 不会生成完整 Python 后端。统一脚本会同时打包 `omg_backend.exe`、`omg_injector.exe` 和共享运行依赖，并检查分发目录是否夹带配置与日志。
+只执行 `flutter build windows` 不会生成完整 Python 后端。统一脚本会打包 `omg_backend.exe`、`omg_injector.exe` 和共享运行依赖，并构建更新器，将 `OMG-Neo-Updater.exe` 与其校验文件放入包根目录，再生成更新清单并检查分发目录是否夹带配置与日志。Debug 和 Release 均随包提供更新器，无需再作为独立 Release 附件发布。
 
 `launch.ps1` 只启动默认的 `dist/OMG-Neo/omg_neo.exe`；使用自定义包名时，应直接运行对应目录中的 EXE。
 
