@@ -24,6 +24,39 @@ class WiringTests(unittest.TestCase):
         reply = client.call("config.patch", patch={"gimi_folder": str(gimi), "auto_check_update": False})
         self.assertIn("result", reply, reply)
 
+    def test_search_scope_and_installed_release_notes_persist(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            gimi = root / "gimi"
+            ini = gimi / "Core/GIMI/main.ini"
+            ini.parent.mkdir(parents=True)
+            ini.write_text("global $version = 9.10\n")
+            client = Client(root / "data", {
+                "tag_name": "v9.2.0", "body": "Next release", "zip_url": "unused",
+                "_tagReleases": {"9.1.0": {"tag_name": "9.1.0", "body": "Installed release"}},
+            })
+            try:
+                self.config(client, gimi)
+                revision = client.call("hello")["result"]["snapshot"]["revision"]
+                self.assertEqual(client.call("resources.searchScope", scope="global")["result"]["scope"], "global")
+                self.assertIn("error", client.call("resources.searchScope", scope="invalid"))
+                self.assertEqual(client.call("hello")["result"]["snapshot"]["revision"], revision)
+                self.assertEqual(self.task(client, "updates.check")["state"], "succeeded")
+                self.assertEqual(client.call("updates.notes.get", version="9.1.0")["result"], {})
+                self.assertIn("error", client.call("updates.notes.get", version="9.2.0"))
+                result = self.task(client, "updates.notes.refresh", version="9.1.0")
+                self.assertEqual(result["result"]["notes"]["body"], "Installed release")
+            finally:
+                client.close()
+            client = Client(root / "data")
+            try:
+                self.assertEqual(client.call("hello")["result"]["snapshot"]["resourceSearchScope"], "global")
+                self.assertEqual(client.call("updates.notes.get", version="9.1.0")["result"]["body"], "Installed release")
+                ini.write_text("global $version = 9.20\n")
+                self.assertEqual(client.call("updates.notes.get", version="9.2.0")["result"]["body"], "Next release")
+            finally:
+                client.close()
+
     def test_resource_card_preferences_search_and_breadcrumb_requests(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

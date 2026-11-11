@@ -34,8 +34,8 @@ class Client:
                 f"exec('if {bool(fixture.get('_verificationFailure'))}:\\n from PySide6.QtCore import QTimer,QCoreApplication\\n from types import SimpleNamespace\\n from injection_service import IsolatedLaunchController as LaunchController\\n def failed_launch(self):\\n  self._worker=SimpleNamespace(verification_state=\"failed\",isRunning=lambda:False)\\n  self._on_finished(False,\"fixture verification failed\")\\n  QTimer.singleShot(0,QCoreApplication.quit)\\n LaunchController.toggle=failed_launch');"
                 "from omg.core import gimi_update;sys.stdout=out;"
                 f"release=json.loads({json.dumps(fixture)!r});"
-                "import time,os;from omg.domain.inject import process_tracker;"
-                "process_tracker.is_process_running=lambda name: release.get('_gameRunning',False);"
+                "import time,os;from omg.domain import game_process;"
+                "game_process.is_process_running=lambda name: release.get('_gameRunning',False);"
                 "exec('if release.get(\"_injectorCommand\"):\\n import injection_service\\n injection_service.injector_command=lambda root: release[\"_injectorCommand\"]');"
                 "import ctypes,ctypes.wintypes as wt;native=ctypes.WinDLL('kernel32');"
                 "native.GetStdHandle.argtypes=[wt.DWORD];native.GetStdHandle.restype=wt.HANDLE;"
@@ -44,6 +44,7 @@ class Client:
                 "gimi_update.fetch_latest_release=lambda **kwargs: (os.write(1,b'NATIVE_FD_OUTPUT\\n'),native.WriteFile(native.GetStdHandle(wt.DWORD(-11)),buffer,len(buffer.value),ctypes.byref(written),None),time.sleep(release.get('_delay',0)),release)[-1];"
                 "exec('if \"_buildReleases\" in release:\\n from omg.core import alchemy\\n alchemy.fetch_releases=lambda **kwargs: release[\"_buildReleases\"]');"
                 "exec('if release.get(\"_failBuild\"):\\n from omg.core import alchemy\\n from types import SimpleNamespace\\n alchemy.run_env_check=lambda *args,**kwargs: SimpleNamespace(ready=True,to_tip_text=lambda *args: \"ready\")\\n alchemy.build_project=lambda *args,**kwargs: (False,\"fixture compile failure\")\\n alchemy.run_ritual=lambda *args,**kwargs: Path(\"ritual-should-not-run\").write_text(\"unexpected\")');"
+                "exec('if \"_tagReleases\" in release:\\n from omg.core import download\\n download.fetch_json_api_smart=lambda url,**kwargs: release[\"_tagReleases\"].get(url.rsplit(\"/\", 1)[-1])');"
                 "raise SystemExit(main.main())"
             )
             command = [sys.executable, "-u", "-c", code]
@@ -198,7 +199,9 @@ class ProtocolTests(unittest.TestCase):
                 self.assertEqual(result["versions"], {"GIMI": "9.1.0", "ORFix": "2.0", "TexFx": "3.0"})
                 self.assertIn("error", client.call("config.patch", revision=0, patch={"theme": "dark"}))
                 self.assertIn("error", client.call("config.patch", patch={"gimi_update_whitelist": ["../escape/"]}))
-                self.assertEqual(client.call("settings.flush")["result"]["status"], "written")
+                # The debounce timer may have persisted these settings already.
+                self.assertIn(client.call("settings.flush")["result"]["status"],
+                              ("written", "unchanged"))
                 text = ini.read_text(encoding="utf-8")
                 self.assertIn('launch = "custom launcher.exe"', text)
                 self.assertIn("hunting = 1", text)

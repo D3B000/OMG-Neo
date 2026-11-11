@@ -26,7 +26,13 @@ class NeoController extends ChangeNotifier {
   bool resourcesLoaded = false;
   double? taskProgress;
   int resourceEpoch = 0;
+  int resourceStatusRevision = 0;
   Completer<List<Map<String, dynamic>>>? _keysRequest;
+  Completer<Map<String, dynamic>>? _notesRequest;
+  String resourceSearchScope = 'directory';
+  String _savedResourceScope = 'directory';
+  int _scopeWrite = 0;
+  int _scopeWritesPending = 0;
   Map<String, dynamic> _pending = {};
   final _finished = <String>{};
   @visibleForTesting
@@ -51,6 +57,7 @@ class NeoController extends ChangeNotifier {
     error = null;
     status = '正在重新连接…';
     noticeKind = 'resources.reconnect';
+    resourceStatusRevision++;
     notifyListeners();
     try {
       _subscription ??= backend.events.listen(_event);
@@ -113,6 +120,10 @@ class NeoController extends ChangeNotifier {
   }
 
   void _snapshot(Map<String, dynamic> snapshot) {
+    if (_scopeWritesPending == 0 && snapshot['resourceSearchScope'] != null) {
+      _savedResourceScope = resourceSearchScope =
+          snapshot['resourceSearchScope'] == 'global' ? 'global' : 'directory';
+    }
     final previousGimi = settings['gimi_folder'];
     settings = Map<String, dynamic>.from(snapshot['settings'] as Map);
     if (previousGimi != settings['gimi_folder']) {
@@ -191,6 +202,15 @@ class NeoController extends ChangeNotifier {
           _snapshot(Map<String, dynamic>.from(data['snapshot']));
         }
         final result = Map<String, dynamic>.from(data['result'] as Map? ?? {});
+        if (data['kind'] == 'updates.notes.refresh') {
+          final waiter = _notesRequest;
+          _notesRequest = null;
+          if (data['state'] == 'succeeded' && result['notes'] is Map) {
+            waiter?.complete(Map<String, dynamic>.from(result['notes']));
+          } else {
+            waiter?.completeError(StateError(status));
+          }
+        }
         if (data['kind'] == 'resources.keys' && _keysRequest != null) {
           final waiter = _keysRequest!;
           _keysRequest = null;
@@ -275,6 +295,9 @@ class NeoController extends ChangeNotifier {
         }
       case 'backend.failed':
         _disconnected = true;
+        resourceStatusRevision++;
+        _notesRequest?.completeError(StateError('${data['message']}'));
+        _notesRequest = null;
         _keysRequest?.completeError(StateError('${data['message']}'));
         _keysRequest = null;
         ready = false;
@@ -339,6 +362,7 @@ class NeoController extends ChangeNotifier {
     busy = true;
     taskKind = method;
     noticeKind = method;
+    if (method.startsWith('resources.')) resourceStatusRevision++;
     taskProgress = null;
     error = null;
     update.enabled = false;
@@ -372,6 +396,40 @@ class NeoController extends ChangeNotifier {
   Future<Map<String, dynamic>> resourceCall(
           String method, Map<String, dynamic> params) =>
       backend.call(method, params);
+
+  Future<void> setResourceSearchScope(String scope) async {
+    resourceSearchScope = scope;
+    final write = ++_scopeWrite;
+    _scopeWritesPending++;
+    try {
+      await backend.call('resources.searchScope', {'scope': scope});
+      _savedResourceScope = scope;
+    } catch (_) {
+      if (_scopeWrite == write) resourceSearchScope = _savedResourceScope;
+      rethrow;
+    } finally {
+      _scopeWritesPending--;
+    }
+  }
+
+  Future<Map<String, dynamic>> releaseNotes(String version) =>
+      backend.call('updates.notes.get', {'version': version});
+
+  Future<Map<String, dynamic>> refreshReleaseNotes(String version) {
+    if (!ready || busy || closing || _notesRequest != null) {
+      return Future.error(StateError('请等待当前任务完成后重试'));
+    }
+    final waiter = Completer<Map<String, dynamic>>();
+    _notesRequest = waiter;
+    unawaited(() async {
+      await businessTask('updates.notes.refresh', {'version': version});
+      if (!busy && identical(_notesRequest, waiter)) {
+        _notesRequest = null;
+        waiter.completeError(StateError(error ?? '更新说明获取失败'));
+      }
+    }());
+    return waiter.future;
+  }
 
   Future<List<Map<String, dynamic>>> resourceKeys(
       String id, int revision) async {
@@ -564,6 +622,8 @@ class NeoController extends ChangeNotifier {
 
   Future<void> _close() async {
     closing = true;
+    _notesRequest?.completeError(StateError('应用正在关闭'));
+    _notesRequest = null;
     final transport =
         backend is QuiescentNeoBackend ? backend as QuiescentNeoBackend : null;
     transport?.setClosing(true);

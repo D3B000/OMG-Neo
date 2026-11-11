@@ -20,13 +20,21 @@
 ## 构建保证
 
 `neo_hosts.spec` 分别分析 `main.py` 和 `injector_main.py`。
-注入图若出现服务端、资源、构建、requests/urllib3 等业务模块，构建立即失败。
+服务端的依赖图若出现注入入口或 omg.domain.inject / omg.domain.launch，构建立即失败。
+注入端的依赖图若出现服务端、资源、构建、requests/urllib3 等业务模块，构建立即失败。
 共享依赖遇到同名不同内容也立即失败；两个 base_library.zip 的成员经过冲突检查后合并。
 每个 EXE 保留独立的压缩 PYZ，使用普通 onedir 启动，不额外解压另一个 EXE。
 
 前两项已验证的裁剪同时启用：排除 Qt 软件 OpenGL 库及可选 PyOpenSSL/cryptography 分支。
+两个入口均未安装 Qt 翻译器，收集阶段裁掉 PySide6/translations。
 Python 原生 libssl/libcrypto 保留。两份 EXE 都嵌入 krr.ico。
 `build.ps1` 要求输出目录为空，防止旧的冗余 DLL 随更新残留。
+
+## 2026-11-11 构建体积
+
+用同一台机器上的原有 onedir 产物与新构建对比。文件总大小从 50.30 MiB 降至 44.05 MiB，减少 6.25 MiB（约 12.4%）。
+其中 96 个 Qt 翻译文件占 6.18 MiB，服务 EXE 缩小约 68 KiB。
+共享包中剩余的 PySide6 与 shiboken6 文件约 14.78 MiB，包含两端共用的 QtCore 与部分 C 运行库。移除整套依赖需要迁移两端的事件循环和线程调度，再验证原生依赖的加载。
 
 ## 验证与边界
 

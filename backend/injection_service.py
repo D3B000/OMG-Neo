@@ -174,7 +174,7 @@ class IsolatedLaunchController(QObject):
         self._exit_timer.stop()
 
     def _on_exit_tick(self):
-        from omg.domain.inject.process_tracker import is_process_running
+        from omg.domain.game_process import is_process_running
         if self._active_target and not is_process_running(self._active_target):
             self._stop_exit_watch()
             self._active_target = ""

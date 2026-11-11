@@ -23,33 +23,17 @@ import ctypes.wintypes as wt
 from enum import Enum
 from typing import List, Optional, Tuple
 
+from omg.domain.game_process import enum_processes, get_process, is_process_running
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Win32 常量 / 结构体
 # ---------------------------------------------------------------------------
-TH32CS_SNAPPROCESS = 0x00000002
-INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value  # -1
-
 # 进程判活：只要 SYNCHRONIZE 权限即可 WaitForSingleObject，权限最小化
 PROCESS_SYNCHRONIZE = 0x00100000
 WAIT_OBJECT_0 = 0x00000000
 WAIT_TIMEOUT = 0x00000102
-
-
-class _PROCESSENTRY32(ctypes.Structure):
-    _fields_ = [
-        ("dwSize", ctypes.c_ulong),
-        ("cntUsage", ctypes.c_ulong),
-        ("th32ProcessID", ctypes.c_ulong),
-        ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
-        ("th32ModuleID", ctypes.c_ulong),
-        ("cntThreads", ctypes.c_ulong),
-        ("th32ParentProcessID", ctypes.c_ulong),
-        ("pcPriClassBase", ctypes.c_long),
-        ("dwFlags", ctypes.c_ulong),
-        ("szExeFile", ctypes.c_wchar * 260),
-    ]
 
 
 def _kernel32():
@@ -63,42 +47,6 @@ def _user32():
 # ---------------------------------------------------------------------------
 # 进程 / 窗口枚举（ctypes 实现，替代 psutil / pywin32）
 # ---------------------------------------------------------------------------
-def enum_processes() -> List[Tuple[int, str]]:
-    """返回 [(pid, exe_name), ...]，等价于 psutil.process_iter 的最小实现。"""
-    kernel32 = _kernel32()
-    snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-    if snap == INVALID_HANDLE_VALUE or snap is None:
-        return []
-
-    pe = _PROCESSENTRY32()
-    pe.dwSize = ctypes.sizeof(pe)
-    out: List[Tuple[int, str]] = []
-    try:
-        if kernel32.Process32FirstW(snap, ctypes.byref(pe)):
-            while True:
-                out.append((int(pe.th32ProcessID), pe.szExeFile))
-                if not kernel32.Process32NextW(snap, ctypes.byref(pe)):
-                    break
-    finally:
-        kernel32.CloseHandle(snap)
-    return out
-
-
-def get_process(process_id: Optional[int] = None,
-                process_name: Optional[str] = None) -> Optional[Tuple[int, str]]:
-    """按名或 PID 查找进程，返回 (pid, name)；找不到返回 None。
-
-    等价于 XXMI 的 get_process()，但用 ctypes 实现。
-    """
-    want_name = process_name.lower() if process_name else None
-    for pid, name in enum_processes():
-        if process_id is not None and pid == process_id:
-            return pid, name
-        if want_name is not None and name.lower() == want_name:
-            return pid, name
-    return None
-
-
 def get_pid_name(process_id: int) -> Optional[str]:
     """按 PID 反查进程名。用于识别 PID 复用（原 PID 已被别的进程占用）。"""
     if not process_id or process_id <= 0:
@@ -231,8 +179,3 @@ def find_process_pid(name: str, timeout: int = 30) -> Optional[int]:
     """便捷封装：在 timeout 秒内轮询等待进程出现，返回 pid 或 None。"""
     result, pid = wait_for_process(name, timeout=timeout)
     return pid if result == WaitResult.Found else None
-
-
-def is_process_running(name: str) -> bool:
-    """单次快照判断进程是否存在（心跳 / 安全网检查用）。"""
-    return get_process(process_name=name) is not None

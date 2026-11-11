@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 BACKEND = Path(__file__).resolve().parents[1]
 
@@ -66,7 +67,16 @@ raise SystemExit(main.main())
         try:
             call('hello')
             accepted = call('build.cleanup.scan')
-            threading.Event().wait(.5)
+            if 'result' in accepted:
+                deadline = time.monotonic() + 10
+                while not any(event.get('event') == 'task.finished' for event in events):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        events.append(messages.get(timeout=remaining))
+                    except queue.Empty:
+                        break
             reply = call('hello')
             snapshot = reply.get('result', {}).get('snapshot', {})
             call('shutdown')

@@ -117,7 +117,7 @@ class IsolationTests(unittest.TestCase):
             request, result = root / 'request.json', root / 'result.json'
             request.write_text(json.dumps({'token': 'fixture', 'settings': {}}))
             frozen = os.environ.get('OMGNEO_FROZEN_BACKEND')
-            command = [str(Path(frozen).with_name('omg_injector.exe'))] if frozen else [sys.executable, str(BACKEND / 'main.py')]
+            command = [str(Path(frozen).with_name('omg_injector.exe'))] if frozen else [sys.executable, str(BACKEND / 'injector_main.py')]
             process = subprocess.run(command + ['--injector',
                 '--data-root', str(root), '--request-file', str(request), '--result-file', str(result)],
                 capture_output=True, timeout=20)
@@ -135,8 +135,9 @@ import sys,time,threading
 from pathlib import Path
 from types import SimpleNamespace
 sys.path.insert(0,{str(BACKEND)!r})
-import main
-main.bootstrap(Path({str(root)!r}),Path({str(BACKEND.parent / 'OMGLite' / 'src')!r}))
+from backend_runtime import bootstrap
+import injector_main
+bootstrap(Path({str(root)!r}),Path({str(BACKEND.parent / 'OMGLite' / 'src')!r}))
 from omg.domain.launch.controller import LaunchController
 from omg.domain.launch.worker import LaunchWorker
 LaunchController._build_task=lambda self: (True,'',SimpleNamespace(d3dx_target='fixture.exe'))
@@ -148,7 +149,7 @@ def run(self):
  time.sleep(.1)
  Path({str(root / 'cleanup.done')!r}).write_text('done')
 LaunchWorker.run=run
-raise SystemExit(main.main())
+raise SystemExit(injector_main.main())
 '''
             process = subprocess.run([sys.executable, '-c', code, '--injector', '--data-root', str(root),
                 '--request-file', str(request), '--result-file', str(result)], capture_output=True, timeout=20)

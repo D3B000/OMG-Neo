@@ -18,6 +18,7 @@ import traceback
 import uuid
 
 from settings_store import SettingsStore, DEFAULTS
+from ui_state import UiState, fetch_installed_release
 from backend_runtime import bootstrap
 
 
@@ -75,8 +76,8 @@ def serve(args):
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     paths = bootstrap(root, args.lite_src)
     from PySide6.QtCore import QCoreApplication, QObject, QThread, QTimer, Signal, Slot
-    from omg.domain.inject.loader import patch_d3dx_runtime_options, find_game_exe
-    from omg.domain.inject.process_tracker import is_process_running
+    from omg.domain.d3dx_ini import patch_d3dx_runtime_options
+    from omg.domain.game_process import find_game_exe, is_process_running
     from injection_service import IsolatedLaunchController
     from omg.core.logging_setup import logger as legacy_logger
     import logging
@@ -181,6 +182,7 @@ def serve(args):
 
         def state(self):
             return {**self.config.snapshot(), "versions": self.versions(),
+                    "resourceSearchScope": ui.scope,
                     "launchState": self.launch_state, "launchDetail": self.launch_detail,
                     "activeTask": self.task_id, "eventSeq": self.seq, "bisectActive": self.bisect.active}
 
@@ -269,6 +271,15 @@ def serve(args):
                             self.config.commit({}, metadata={"checkedAt": int(time.time())})
                         except OSError as exc:
                             error = f"检查完成，但保存检查时间失败：{exc}"
+                        if self.release.get("body"):
+                            try:
+                                ui.save_release(self.release)
+                            except OSError:
+                                traceback.print_exc(file=sys.stderr)
+                if not error and kind == "updates.notes.refresh" and not cancelled:
+                    release = result.pop("release")
+                    ui.save_release(release)
+                    result["notes"] = ui.notes(release["tag_name"].lstrip("vV"))
                 result.pop("release", None)
                 if not error and kind == "update":
                     if result.get("ok"):
@@ -385,6 +396,23 @@ def serve(args):
                 if params.get("protocol", 1) != 1:
                     raise ValueError("不兼容的协议版本")
                 return {"protocol": 1, "snapshot": self.state()}
+            if method == "resources.searchScope":
+                scope = params.get("scope")
+                if scope not in ("directory", "global"):
+                    raise ValueError("无效的搜索范围")
+                if scope != ui.scope:
+                    ui.commit(searchScope=scope)
+                return {"scope": scope}
+            if method in ("updates.notes.get", "updates.notes.refresh"):
+                version = params.get("version")
+                if not version or version != self.versions()["GIMI"]:
+                    raise ValueError("GIMI 版本已变化，请重新打开更新说明")
+                if method == "updates.notes.get":
+                    return ui.notes(version)
+                return self.start_worker(
+                    method, lambda worker: {"release": fetch_installed_release(
+                                                version, worker.cancel.is_set),
+                                            "message": "更新说明已刷新"})
             if self.bisect.active:
                 if method == "settings.flush":
                     if self.ini_dirty_since is not None:
@@ -578,6 +606,7 @@ def serve(args):
             self.bisect.close()  # Pending sessions remain journaled; never mutate while a game may be running.
             app.quit()
 
+    ui = UiState(root)
     app = QCoreApplication([])
     # This is a service, not a last-window/last-job-owned GUI application.
     app.setQuitLockEnabled(False)
@@ -611,18 +640,10 @@ def main():
     parser.add_argument("--stdio", action="store_true")
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--lite-src", type=Path)
-    parser.add_argument("--injector", action="store_true")
-    parser.add_argument("--request-file", type=Path)
-    parser.add_argument("--result-file", type=Path)
     args = parser.parse_args()
     if not getattr(sys, "frozen", False):
         args.lite_src = args.lite_src or Path(__file__).resolve().parents[1] / "OMGLite" / "src"
     try:
-        if args.injector:
-            if not args.request_file or not args.result_file:
-                parser.error("注入端需要 --request-file 和 --result-file")
-            from injection_entry import run_injector
-            return run_injector(args)
         return serve(args)
     except Exception:
         traceback.print_exc(file=sys.stderr)

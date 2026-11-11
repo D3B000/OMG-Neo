@@ -36,8 +36,10 @@ class EfDropdown extends StatefulWidget {
       {super.key,
       required this.value,
       required this.items,
+      this.height = 28,
       required this.onChanged});
   final String value;
+  final double height;
   final List<String> items;
   final ValueChanged<String>? onChanged;
   @override
@@ -163,7 +165,7 @@ class _EfDropdownState extends State<EfDropdown> {
                           padding: const WidgetStatePropertyAll(
                               EdgeInsets.symmetric(horizontal: 8)),
                           minimumSize:
-                              const WidgetStatePropertyAll(Size(0, 28)),
+                              WidgetStatePropertyAll(Size(0, widget.height)),
                           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                           backgroundColor: WidgetStatePropertyAll(c.chip),
                           foregroundColor: WidgetStatePropertyAll(c.ink),

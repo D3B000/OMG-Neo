@@ -12,28 +12,35 @@ icon = str(root.parent / 'omg_neo/krr.ico')
 excluded = ['PySide6.QtWidgets', 'PySide6.QtGui', 'PySide6.QtMultimedia',
             'PySide6.QtNetwork', 'cryptography', 'OpenSSL', 'urllib3.contrib.pyopenssl']
 service = Analysis([str(root / 'main.py')], pathex=[str(root), str(lite)],
-    binaries=[], datas=[(str(lite / 'omg/resources/binaries/loader'), 'resources/binaries/loader'),
-                        (str(root / 'vendor/ritual'), 'resources/binaries/ritual')],
+    binaries=[], datas=[(str(root / 'vendor/ritual'), 'resources/binaries/ritual')],
     hiddenimports=['omg.core.paths'], hookspath=[], hooksconfig={}, runtime_hooks=[],
     excludes=excluded, noarchive=False, optimize=0)
 injector = Analysis([str(root / 'injector_main.py')], pathex=[str(root), str(lite)],
-    binaries=[], datas=[], hiddenimports=['omg.core.paths'], hookspath=[], hooksconfig={},
+    binaries=[], datas=[(str(lite / 'omg/resources/binaries/loader'), 'resources/binaries/loader')],
+    hiddenimports=['omg.core.paths'], hookspath=[], hooksconfig={},
     runtime_hooks=[], excludes=excluded, noarchive=False, optimize=0)
 
-# A back-reference to main/bootstrap would silently pull the entire service
-# graph into the injector again. Fail the build instead of hiding that mistake.
-forbidden = ('main', 'build_service', 'resource_service', 'resource_browser',
-             'injection_service', 'omg.core.alchemy', 'omg.core.gimi_update',
-             'omg.core.lanzou', 'requests', 'urllib3')
+def check_modules(host, modules, forbidden):
+    unexpected = sorted(name for name in modules if any(
+        name == prefix or name.startswith(prefix + '.') for prefix in forbidden))
+    if unexpected:
+        raise RuntimeError(f'{host} imported modules from the other host: {unexpected}')
+
+
+service_modules = {entry[0] for entry in service.pure}
+check_modules('Service', service_modules, ('injection_entry', 'injector_main',
+              'omg.domain.inject', 'omg.domain.launch'))
 injector_modules = {entry[0] for entry in injector.pure}
-unexpected = sorted(name for name in injector_modules if any(
-    name == prefix or name.startswith(prefix + '.') for prefix in forbidden))
-if unexpected:
-    raise RuntimeError(f'Injector imported service-only modules: {unexpected}')
+check_modules('Injector', injector_modules, ('main', 'build_service', 'resource_service', 'resource_browser',
+             'injection_service', 'omg.core.alchemy', 'omg.core.gimi_update',
+             'omg.core.lanzou', 'requests', 'urllib3'))
 
 removed = {'opengl32sw.dll', 'icuuc.dll', 'icudt78.dll'}
 def trimmed(entries):
-    return [entry for entry in entries if Path(entry[0]).name.lower() not in removed]
+    # Neither host installs a Qt translator.
+    return [entry for entry in entries
+            if Path(entry[0]).name.lower() not in removed
+            and not entry[0].replace('\\', '/').startswith('PySide6/translations/')]
 
 # Merge shared files explicitly. Never let collection order silently choose
 # conflicting DLLs. base_library.zip can contain different bootstrap subsets;
@@ -73,7 +80,7 @@ injector_exe = EXE(PYZ(injector.pure), injector.scripts, [], exclude_binaries=Tr
     name='omg_injector', debug=False, strip=False, upx=False, console=True, icon=icon)
 COLLECT(service_exe, injector_exe, libraries, assets, strip=False, upx=False, name='omg_backend')
 Path(CONF['workpath'], 'host-modules.json').write_text(json.dumps({
-    'service': sorted(entry[0] for entry in service.pure),
+    'service': sorted(service_modules),
     'injector': sorted(injector_modules),
     'sharedLibraries': sorted(entry[0] for entry in libraries),
     'sharedAssets': sorted(entry[0] for entry in assets),

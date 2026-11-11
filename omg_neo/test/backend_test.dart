@@ -1,6 +1,9 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:omg_neo/backend/neo_backend.dart';
@@ -33,6 +36,7 @@ class FixtureBackend
     'accent_color': '#39C5BB',
   };
   int revision = 0;
+  String searchScope = 'directory';
   bool rejectSave = false;
   bool rejectClose = false;
   int closeCount = 0;
@@ -52,6 +56,7 @@ class FixtureBackend
   Map<String, dynamic> get snapshot => {
         'settings': Map<String, dynamic>.from(settings),
         'revision': revision,
+        'resourceSearchScope': searchScope,
         'versions': {'GIMI': '9.1.0', 'ORFix': '2.0', 'TexFx': ''},
         'launchState': 'idle',
       };
@@ -80,6 +85,9 @@ class FixtureBackend
         return snapshot;
       case 'cache.info':
         return {'bytes': 1024};
+      case 'resources.searchScope':
+        searchScope = params['scope'] as String;
+        return {'scope': searchScope};
       case 'updates.check':
         return {'taskId': 'check1'};
       case 'launch.start':
@@ -98,7 +106,153 @@ class FixtureBackend
   }
 }
 
+Future<void> reviewScreenshot(WidgetTester tester, String name) async {
+  final boundary = tester
+      .renderObject<RenderRepaintBoundary>(find.byType(RepaintBoundary).first);
+  await tester.runAsync(() async {
+    final image = await boundary.toImage();
+    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+    Directory('validation').createSync(recursive: true);
+    File('validation/ui-review-20261110-$name.png')
+        .writeAsBytesSync(bytes!.buffer.asUint8List());
+    image.dispose();
+  });
+}
+
+Future<void> loadReviewFonts() async {
+  await (FontLoader('Saira')..addFont(rootBundle.load('fonts/Saira.ttf')))
+      .load();
+  await (FontLoader('MaterialIcons')
+        ..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf')))
+      .load();
+  final chinese = File('C:/Windows/Fonts/msyh.ttc');
+  if (chinese.existsSync()) {
+    await (FontLoader('Noto Sans SC')
+          ..addFont(
+              Future.value(ByteData.sublistView(chinese.readAsBytesSync()))))
+        .load();
+  }
+}
+
 void main() {
+  testWidgets(
+      'resource loading uses the bottom strip and restores search scope',
+      (tester) async {
+    await loadReviewFonts();
+    await tester.binding.setSurfaceSize(const Size(960, 540));
+    const window = MethodChannel('window_manager');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(window, (_) async => null);
+    final backend = FixtureBackend()
+      ..searchScope = 'global'
+      ..replies['resources.list'] = {'taskId': 'first'};
+    final controller = NeoController(backend);
+    addTearDown(() async {
+      controller.dispose();
+      await backend.close();
+      messenger.setMockMethodCallHandler(window, null);
+      await tester.binding.setSurfaceSize(null);
+    });
+    await controller.start();
+    await tester.pumpWidget(NeoApp(controller: controller, resources: true));
+    await tester.pump();
+    await tester.pump();
+    expect(backend.parameters['resources.list']?['recursive'], isTrue);
+    expect(find.text('搜索整个 Mods'), findsOneWidget);
+    final strip = find.byKey(const ValueKey('home.progress-cells'));
+    expect(tester.getBottomLeft(strip).dy, 540);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.text('取消'), findsNothing);
+    await reviewScreenshot(tester, 'resource-loading');
+    backend.stream.add({
+      'event': 'task.finished',
+      'data': {
+        'taskId': 'first',
+        'kind': 'resources.list',
+        'state': 'failed',
+        'message': 'fixture error',
+      }
+    });
+    await tester.pumpAndSettle();
+    expect(strip, findsNothing);
+    expect(tester.getTopLeft(find.text('资源操作未完成')).dy, greaterThan(420));
+    await reviewScreenshot(tester, 'resource-status');
+    await tester.tap(find.text('查看详情'));
+    await tester.pumpAndSettle();
+    expect(find.text('资源操作详情'), findsOneWidget);
+    await tester.tap(find.text('关闭'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('关闭状态提示'));
+    await tester.pumpAndSettle();
+    expect(find.text('资源操作未完成'), findsNothing);
+    expect(find.text('资源操作详情'), findsNothing);
+    await tester.tap(find.text('全局'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('当前目录').last);
+    await tester.pump();
+    await tester.pump();
+    expect(backend.searchScope, 'directory');
+    expect(backend.parameters['resources.list']?['recursive'], isFalse);
+    backend.stream.add({
+      'event': 'task.finished',
+      'data': {
+        'taskId': 'first',
+        'kind': 'resources.list',
+        'state': 'failed',
+        'message': 'fixture error',
+      }
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('资源操作未完成'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  for (final theme in ['light', 'dark']) {
+    testWidgets('GIMI notes retain stale cache when refresh fails in $theme',
+        (tester) async {
+      await loadReviewFonts();
+      await tester.binding.setSurfaceSize(const Size(960, 540));
+      const window = MethodChannel('window_manager');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(window, (_) async => null);
+      final backend = FixtureBackend()
+        ..settings['theme'] = theme
+        ..replies['updates.notes.get'] = {'body': 'Cached notes', 'stale': true}
+        ..replies['updates.notes.refresh'] = {'taskId': 'notes'};
+      final controller = NeoController(backend);
+      addTearDown(() async {
+        controller.dispose();
+        await backend.close();
+        messenger.setMockMethodCallHandler(window, null);
+        await tester.binding.setSurfaceSize(null);
+      });
+      await controller.start();
+      await tester.pumpWidget(NeoApp(controller: controller));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('home.gimi-release-notes')));
+      await tester.pumpAndSettle();
+      expect(find.text('GIMI 9.1.0 更新说明'), findsOneWidget);
+      expect(find.text('Cached notes'), findsOneWidget);
+      expect(backend.parameters['updates.notes.refresh'], {'version': '9.1.0'});
+      backend.stream.add({
+        'event': 'task.finished',
+        'data': {
+          'taskId': 'notes',
+          'kind': 'updates.notes.refresh',
+          'state': 'failed',
+          'message': 'fixture offline',
+        }
+      });
+      await tester.pumpAndSettle();
+      expect(find.text('Cached notes'), findsOneWidget);
+      expect(find.text('重试'), findsOneWidget);
+      await reviewScreenshot(tester, 'notes-$theme');
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
   test('cache cleanup reports progress without changing update state',
       () async {
     final backend = FixtureBackend()

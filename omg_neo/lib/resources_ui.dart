@@ -37,6 +37,7 @@ class ResourcePreview {
 }
 
 class ResourcesDraft {
+  (int, String?)? dismissedBackendStatus;
   final path = <String>[];
   final scrollPositions = <String, double>{};
   void rememberScroll(String path, double offset) {
@@ -165,6 +166,7 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
 
   void scheduleLoad() {
     if (live == null) return;
+    d.scope = live!.resourceSearchScope == 'global' ? '全局' : '当前目录';
     if (!live!.resourcesLoaded && epoch != live!.resourceEpoch) {
       epoch = live!.resourceEpoch;
       requested = false;
@@ -186,6 +188,22 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
       requested = true;
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         if (mounted) reload();
+      });
+    }
+  }
+
+  Future<void> changeScope(String value) async {
+    if (d.scope == value) return;
+    setState(() => d.scope = value);
+    try {
+      await live
+          ?.setResourceSearchScope(value == '全局' ? 'global' : 'directory');
+      if (mounted && d.scope == value) reload();
+    } catch (error) {
+      if (!mounted || d.scope != value) return;
+      setState(() {
+        d.scope = live!.resourceSearchScope == 'global' ? '全局' : '当前目录';
+        inlineError = '无法保存搜索范围：$error';
       });
     }
   }
@@ -335,17 +353,17 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
                   child: Center(
                       child: SizedBox(
                           width: 350,
-                          height: 34,
+                          height: 38,
                           child: Row(children: [
                             SizedBox(
-                                width: 98,
+                                width: 88,
                                 child: EfDropdown(
+                                    height: 36,
                                     value: d.scope,
                                     items: const ['当前目录', '全局'],
-                                    onChanged: (value) {
-                                      setState(() => d.scope = value);
-                                      reload();
-                                    })),
+                                    onChanged: live == null || live!.ready
+                                        ? changeScope
+                                        : null)),
                             const SizedBox(width: 6),
                             Expanded(
                                 child: TextField(
@@ -412,14 +430,6 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
                                       onPressed: () => Navigator.pop(context))
                                 ]))),
               ],
-              if (live?.busy == true &&
-                  live!.taskKind.startsWith('resources.')) ...[
-                const SizedBox(width: 6),
-                SizedBox(
-                    height: 36,
-                    child: EfButton('取消',
-                        small: true, onPressed: live!.cancelTask)),
-              ],
               const SizedBox(width: 6),
               settingsMenu(),
             ])),
@@ -479,52 +489,101 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
                   directoryMenu(true),
                 ]))),
         const SizedBox(height: 10),
-        if (inlineError != null ||
-            live?.error != null ||
-            (live?.noticeKind == 'resources.move' && live?.busy == false))
-          Padding(
-              padding: const EdgeInsets.only(bottom: 6),
-              child: InkWell(
-                  onTap: () => showEfDialog<void>(
-                      context: context,
-                      builder: (context) => EfDialog(
-                              eyebrow: 'RESOURCE OPERATION',
-                              title: const Text('资源操作详情'),
-                              content: SizedBox(
-                                  width: 560,
-                                  child: SingleChildScrollView(
-                                      child:
-                                          SelectableText(
-                                              inlineError ??
-                                                  live?.error ??
-                                                  live?.status ??
-                                                  '',
-                                              contextMenuBuilder:
-                                                  efTextContextMenu))),
-                              actions: [
-                                EfButton('关闭',
-                                    small: true,
-                                    onPressed: () => Navigator.pop(context))
-                              ])),
-                  child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      child: Row(children: [
-                        Icon(Icons.info_outline, size: 14, color: c.ink2),
-                        const SizedBox(width: 6),
-                        Expanded(
-                            child: Text(
-                                live?.ready == false
-                                    ? '后端连接已断开'
-                                    : inlineError != null || live?.error != null
-                                        ? '资源操作未完成'
-                                        : '资源操作已完成',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: EfType.ui(11, color: c.ink2))),
-                        Text('查看详情', style: EfType.ui(11, color: c.ink2)),
-                      ])))),
-        Expanded(child: widget.region('resources.cards', folderView())),
+        Expanded(
+            child: Stack(fit: StackFit.expand, children: [
+          widget.region('resources.cards', folderView()),
+          if (showOperationStatus)
+            Positioned(
+                left: 0,
+                right: 0,
+                bottom: 68,
+                child: widget.region(
+                    'resources.status',
+                    Material(
+                        color: c.panel,
+                        shape: efCut(br: 8, side: BorderSide(color: c.rule)),
+                        clipBehavior: Clip.antiAlias,
+                        child: Row(children: [
+                          Expanded(
+                              child: InkWell(
+                                  onTap: () => showEfDialog<void>(
+                                      context: context,
+                                      builder: (context) => EfDialog(
+                                              eyebrow: 'RESOURCE OPERATION',
+                                              title: const Text('资源操作详情'),
+                                              content: SizedBox(
+                                                  width: 560,
+                                                  child: SingleChildScrollView(
+                                                      child: SelectableText(
+                                                          inlineError ??
+                                                              live?.error ??
+                                                              live?.status ??
+                                                              '',
+                                                          contextMenuBuilder:
+                                                              efTextContextMenu))),
+                                              actions: [
+                                                EfButton('关闭',
+                                                    small: true,
+                                                    onPressed: () =>
+                                                        Navigator.pop(context))
+                                              ])),
+                                  child: Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                          vertical: 6, horizontal: 10),
+                                      child: Row(children: [
+                                        Icon(Icons.info_outline,
+                                            size: 14, color: c.ink2),
+                                        const SizedBox(width: 6),
+                                        Expanded(
+                                            child: Text(
+                                                live?.ready == false
+                                                    ? '后端连接已断开'
+                                                    : inlineError != null ||
+                                                            live?.error != null
+                                                        ? '资源操作未完成'
+                                                        : '资源操作已完成',
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: EfType.ui(11,
+                                                    color: c.ink2))),
+                                        Text('查看详情',
+                                            style:
+                                                EfType.ui(11, color: c.ink2)),
+                                      ])))),
+                          IconButton(
+                            tooltip: '关闭状态提示',
+                            onPressed: () => setState(() {
+                              inlineError = null;
+                              d.dismissedBackendStatus = backendStatus;
+                            }),
+                            icon: const Icon(Icons.close, size: 15),
+                            color: c.ink2,
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints.tightFor(
+                                width: 32, height: 28),
+                          ),
+                        ])))),
+        ])),
       ]);
+
+  (int, String?)? get backendStatus {
+    final controller = live;
+    if (controller == null) return null;
+    return (controller.resourceStatusRevision, controller.error);
+  }
+
+  bool get showOperationStatus {
+    if (inlineError != null) return true;
+    final controller = live;
+    if (controller == null || backendStatus == d.dismissedBackendStatus) {
+      return false;
+    }
+    return (!controller.ready && controller.error != null) ||
+        (!controller.busy &&
+            (controller.noticeKind == 'resources.move' ||
+                controller.noticeKind.startsWith('resources.') &&
+                    controller.error != null));
+  }
 
   Widget folderView() {
     final root = live == null && d.path.isEmpty;
@@ -533,13 +592,7 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
     final count = root ? shownFolders.length : shown.length;
     if (count == 0) {
       if (live != null && !live!.resourcesLoaded) {
-        return live!.ready && live!.busy
-            ? const Center(
-                child: SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2)))
-            : const SizedBox.shrink();
+        return const SizedBox.shrink();
       }
       return Center(
           child: Text('当前目录没有匹配的资源。', style: EfType.ui(13, color: c.ink2)));

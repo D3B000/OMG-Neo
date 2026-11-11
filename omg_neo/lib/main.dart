@@ -174,7 +174,8 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
             controller.taskKind == 'cache.clear' ||
             controller.taskKind.startsWith('serverSwitch.'));
     if (streaming) _lastBackendNotice = null;
-    final silentResource = (controller.noticeKind.startsWith('resources.') &&
+    final silentResource = controller.noticeKind == 'updates.notes.refresh' ||
+        (controller.noticeKind.startsWith('resources.') &&
             controller.noticeKind != 'resources.writeback') ||
         (page == 1 &&
             !controller.noticeKind.startsWith('build.') &&
@@ -451,6 +452,24 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
                           !building &&
                           !linking &&
                           !switching &&
+                          page == 1)
+                        Positioned(
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            child: region(
+                                'resources.progress',
+                                BottomTaskProgress(
+                                    active: widget.controller?.busy == true &&
+                                        (widget.controller?.taskKind
+                                                .startsWith('resources.') ??
+                                            false),
+                                    progress: widget.controller?.taskProgress,
+                                    message: widget.controller?.status ?? ''))),
+                      if (!bisecting &&
+                          !building &&
+                          !linking &&
+                          !switching &&
                           page == 0)
                         Positioned(
                           left: 0,
@@ -533,6 +552,7 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
         update: updatePreview,
         region: region,
         versions: widget.controller?.versions,
+        controller: widget.controller,
         launchLabel: widget.controller == null
             ? '启动游戏  ↗'
             : widget.controller!.closing
