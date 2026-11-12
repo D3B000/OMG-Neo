@@ -367,7 +367,6 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
                           child: bisecting
                               ? NeoBisect(
                                   controller: widget.controller,
-                                  pickPath: pickPath,
                                   region: region,
                                   onBack: () =>
                                       setState(() => bisecting = false))
@@ -402,14 +401,15 @@ class _WorkspaceState extends State<Workspace> with WindowListener {
                                             ][page](),
                         ),
                       ),
-                      Positioned(
-                        left: 0,
-                        right: 0,
-                        bottom: 18,
-                        child: Center(
-                          child: region('navigation.bottom', bottomBar()),
+                      if (!bisecting)
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 18,
+                          child: Center(
+                            child: region('navigation.bottom', bottomBar()),
+                          ),
                         ),
-                      ),
                       if (bisecting)
                         Positioned(
                             left: 0,

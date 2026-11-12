@@ -24,6 +24,28 @@ class NeoController extends ChangeNotifier {
   String taskKind = '', noticeKind = '';
   Map<String, dynamic> resourceView = {};
   bool resourcesLoaded = false;
+  String? resourceRoot;
+  List<String> get resourceFolders =>
+      (settings['resource_folders'] as List? ?? []).cast<String>();
+
+  void selectResourceRoot(String? root) {
+    if (root == resourceRoot ||
+        (root != null && !resourceFolders.contains(root))) {
+      return;
+    }
+    resourceRoot = root;
+    _invalidateResources();
+    notifyListeners();
+  }
+
+  void _invalidateResources() {
+    resources = {};
+    resourcesLoaded = false;
+    resourceEpoch++;
+  }
+
+  Map<String, dynamic> _resourceParams(Map<String, dynamic> params) =>
+      {if (resourceRoot != null) 'resourceRoot': resourceRoot, ...params};
   double? taskProgress;
   int resourceEpoch = 0;
   int resourceStatusRevision = 0;
@@ -126,10 +148,16 @@ class NeoController extends ChangeNotifier {
     }
     final previousGimi = settings['gimi_folder'];
     settings = Map<String, dynamic>.from(snapshot['settings'] as Map);
+    if ((resourceRoot != null && !resourceFolders.contains(resourceRoot)) ||
+        (resourceRoot == null &&
+            settings['gimi_folder'] == '' &&
+            resourceFolders.isNotEmpty)) {
+      resourceRoot =
+          settings['gimi_folder'] == '' ? resourceFolders.firstOrNull : null;
+      _invalidateResources();
+    }
     if (previousGimi != settings['gimi_folder']) {
-      resources = {};
-      resourcesLoaded = false;
-      resourceEpoch++;
+      _invalidateResources();
       update.live(active: false, syncing: false, ready: false);
     }
     versions = Map<String, dynamic>.from(snapshot['versions'] as Map);
@@ -359,6 +387,7 @@ class NeoController extends ChangeNotifier {
   Future<void> businessTask(String method,
       [Map<String, dynamic> params = const {}]) async {
     if (!ready || busy || closing) return;
+    if (method.startsWith('resources.')) params = _resourceParams(params);
     busy = true;
     taskKind = method;
     noticeKind = method;
@@ -395,7 +424,7 @@ class NeoController extends ChangeNotifier {
 
   Future<Map<String, dynamic>> resourceCall(
           String method, Map<String, dynamic> params) =>
-      backend.call(method, params);
+      backend.call(method, _resourceParams(params));
 
   Future<void> setResourceSearchScope(String scope) async {
     resourceSearchScope = scope;

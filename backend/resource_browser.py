@@ -45,6 +45,16 @@ class ResourceService:
             raise ValueError(f"Mods 目录不存在：{root}")
         return root
 
+    def selected_root(self, selected):
+        if selected is None:
+            return self.root()
+        if not isinstance(selected, str) or selected not in self.config.get("resource_folders", []):
+            raise ValueError("资源目录已从设置移除，请重新选择")
+        root = Path(selected)
+        if not root.is_dir():
+            raise ValueError(f"资源目录不存在：{root}")
+        return root
+
     def resource_path(self, path, root):
         path = Path(os.path.abspath(path))
         try:
@@ -142,9 +152,9 @@ class ResourceService:
             stack.extend((current / name, None) for name in sorted(directories, reverse=True))
         return is_mod, best[3] if best else None
 
-    def listing(self, relative="", worker=None, query="", recursive=False, hide_empty=False):
+    def listing(self, relative="", worker=None, query="", recursive=False, hide_empty=False, selected=None):
         started = time.perf_counter()
-        root = self.root()
+        root = self.selected_root(selected)
         folder = self.resource_path(root / relative, root)
         if not folder.is_dir():
             raise ValueError("目录已移动或不存在，请刷新")
@@ -236,8 +246,8 @@ class ResourceService:
             raise ValueError("资源列表已变化，请刷新后重试")
         root, path, revision, stamp = handle
         root, path = Path(root), Path(path)
-        if self.root() != root:
-            raise ValueError("GIMI 目录已变化，请刷新")
+        if self.selected_root(params.get("resourceRoot")) != root:
+            raise ValueError("资源目录已变化，请刷新")
         self.resource_path(path, root)
         if self.binding(path) != stamp:
             raise ValueError("资源或链接目标已被外部修改，请刷新后重试")
@@ -353,7 +363,7 @@ class ResourceService:
     def refresh(self, params, fallback="", worker=None):
         return self.listing(params.get("path", fallback), worker,
                             params.get("query", ""), params.get("recursive", False),
-                            params.get("hideEmpty", False))
+                            params.get("hideEmpty", False), params.get("resourceRoot"))
 
     def card(self, params, worker):
         root, path = self.checked_handle(params)
@@ -369,16 +379,16 @@ class ResourceService:
         self.save_preferences()
         return self.refresh(params, worker=worker)
 
-    def folders(self, relative):
-        root = self.root()
+    def folders(self, relative, selected=None):
+        root = self.selected_root(selected)
         folder = self.resource_path(root / relative, root)
         with os.scandir(folder) as scan:
             return [{"name": e.name, "path": Path(e.path).relative_to(root).as_posix()}
                     for e in sorted(scan, key=lambda e: e.name.casefold()) if e.is_dir()]
 
-    def directory_entries(self, relative):
+    def directory_entries(self, relative, selected=None):
         """Direct children only; independent of search, card types and listing handles."""
-        root = self.root()
+        root = self.selected_root(selected)
         folder = self.resource_path(root / relative, root)
         folders, files = [], []
         with os.scandir(folder) as scan:
@@ -409,7 +419,7 @@ class ResourceService:
         return {}
 
     def open_path(self, params):
-        root = self.root()
+        root = self.selected_root(params.get("resourceRoot"))
         path = self.resource_path(root / params.get("path", ""), root)
         if params.get("config"):
             if path.suffix.lower() != ".ini" or not path.is_file():
@@ -425,7 +435,7 @@ class ResourceService:
         # Copy completely before touching sources. Keep source recovery names
         # until every destination is committed; never overwrite existing data.
         from resource_service import safe_tree
-        root = self.root()
+        root = self.selected_root(params.get("resourceRoot"))
         target = self.resource_path(root / params.get("path", ""), root)
         target_token = self.token(target)
         sources = [Path(os.path.abspath(p)) for p in params.get("sources", [])]

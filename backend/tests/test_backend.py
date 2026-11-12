@@ -227,16 +227,18 @@ class ProtocolTests(unittest.TestCase):
             finally:
                 client.close()
 
-    def test_update_local_archive_preserves_whitelist(self):
+    def test_update_during_game_preserves_loader_and_whitelist(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             gimi = root / "GIMI"
             (gimi / "Mods").mkdir(parents=True)
             (gimi / "Mods/custom.ini").write_text("local", encoding="utf-8")
             (gimi / "d3dx.ini").write_text("[Hunting]\nhunting = 2\n", encoding="utf-8")
+            (gimi / "d3d11.dll").write_bytes(b"loaded DLL")
             archive = root / "release.zip"
             with zipfile.ZipFile(archive, "w") as zf:
                 zf.writestr("Core/GIMI/main.ini", "global $version = 9.20\n")
+                zf.writestr("D3D11.DLL", b"unexpected replacement DLL")
                 zf.writestr("Mods/custom.ini", "remote")
                 zf.writestr("Mods/new.ini", "remote")
             class Handler(http.server.SimpleHTTPRequestHandler):
@@ -246,7 +248,7 @@ class ProtocolTests(unittest.TestCase):
                 functools.partial(Handler, directory=str(root)))
             threading.Thread(target=server.serve_forever, daemon=True).start()
             url = f"http://127.0.0.1:{server.server_port}/release.zip"
-            client = Client(root / "data", {"tag_name": "v9.2.0", "zip_url": url})
+            client = Client(root / "data", {"tag_name": "v9.2.0", "zip_url": url, "_gameRunning": True})
             try:
                 client.call("hello")
                 client.call("config.patch", patch={"gimi_folder": str(gimi),
@@ -258,6 +260,7 @@ class ProtocolTests(unittest.TestCase):
                 task = client.call("updates.apply")["result"]["taskId"]
                 finished = client.finished(task)
                 self.assertEqual(finished["state"], "succeeded", finished)
+                self.assertEqual((gimi / "d3d11.dll").read_bytes(), b"loaded DLL")
                 self.assertEqual((gimi / "Mods/custom.ini").read_text(), "local")
                 self.assertFalse((gimi / "Mods/new.ini").exists())
                 self.assertEqual(finished["snapshot"]["versions"]["GIMI"], "9.2.0")

@@ -186,7 +186,7 @@ class _EfButtonState extends State<EfButton> {
                 child: Align(
                   alignment: Alignment.centerLeft,
                   child: AnimatedFractionallySizedBox(
-                    duration: Ef.d(context, _down ? Ef.press : Ef.wipe),
+                    duration: Ef.d(context, _down ? Ef.press : Ef.hover),
                     curve: Ef.mech,
                     widthFactor: _down ? 1 : 0,
                     heightFactor: 1,

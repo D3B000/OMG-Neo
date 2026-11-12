@@ -16,6 +16,7 @@ DEFAULTS = {
     "custom_launch_enabled": False, "custom_launch_cmd": "",
     "custom_launch_inject_mode": "hook", "extra_libraries_enabled": False,
     "extra_libraries": "", "theme": "light", "accent_color": "#39C5BB",
+    "resource_folders": [],
 }
 
 
@@ -62,6 +63,16 @@ def validate(patch: dict) -> dict:
             if entry.casefold() not in {p.casefold() for p in normalized}:
                 normalized.append(entry)
         result["gimi_update_whitelist"] = normalized
+    if "resource_folders" in result:
+        entries = result["resource_folders"]
+        if not isinstance(entries, list) or any(
+                not isinstance(p, str) or not Path(p).is_absolute() for p in entries):
+            raise ValueError("资源目录必须为绝对路径数组")
+        folders = {}
+        for entry in entries:
+            path = os.path.normpath(entry)
+            folders.setdefault(os.path.normcase(path), path)
+        result["resource_folders"] = list(folders.values())
     return result
 
 

@@ -226,7 +226,7 @@ def serve(args):
                 if target:
                     targets.add(target)
             if any(is_process_running(target) for target in targets):
-                raise ValueError("游戏正在运行，请退出游戏后更新")
+                raise ValueError("游戏正在运行，请退出游戏后重试")
 
         def start_worker(self, kind, function):
             self.idle_required()
@@ -365,8 +365,9 @@ def serve(args):
                 raise ValueError("请先配置包含 d3dx.ini 的 GIMI 目录")
             if not self.release or self.release_root != gimi:
                 raise ValueError("请先检查更新")
-            self.game_stopped(settings)
             release = dict(self.release)
+            # The game can keep the loader DLL open during a GIMI update.
+            whitelist = [*settings["gimi_update_whitelist"], "d3d11.dll"]
 
             def run(worker):
                 from omg.core import download, updates
@@ -379,7 +380,7 @@ def serve(args):
                     if ok:
                         worker.progress.emit({"message": "部署中；取消将等待回退完成"})
                         ok, message = updates.deploy_gimi_update(
-                            archive, gimi, settings["gimi_update_whitelist"],
+                            archive, gimi, whitelist,
                             should_cancel=worker.cancel.is_set,
                             progress_cb=lambda p: worker.progress.emit({"progress": .86 + p * .13}))
                     return {"ok": ok, "message": "GIMI 更新完成" if ok else message}
@@ -434,6 +435,9 @@ def serve(args):
                     self.idle_required()
                     return self.bisect.export()
                 if action == "scan":
+                    root_choice = params.get("root")
+                    if root_choice is not None and root_choice not in self.config.get("resource_folders", []):
+                        raise ValueError("排查目录不在设置中的模组资源列表，请重新选择")
                     self.flush_ini()
                 return self.start_worker(method, lambda worker: {"bisect": self.bisect.dispatch(action, params, worker)})
             if method in ("config.get", "state.get", "versions.detect"):
@@ -518,9 +522,9 @@ def serve(args):
             if method == "resources.list":
                 return self.start_worker(method, lambda worker: {"resources": self.resources.refresh(params, worker=worker)})
             if method == "resources.folders":
-                return {"folders": self.resources.folders(params.get("path", ""))}
+                return {"folders": self.resources.folders(params.get("path", ""), params.get("resourceRoot"))}
             if method == "resources.directory":
-                return self.resources.directory_entries(params.get("path", ""))
+                return self.resources.directory_entries(params.get("path", ""), params.get("resourceRoot"))
             if method == "resources.configs":
                 return {"files": self.resources.config_files(params)}
             if method == "resources.open":
@@ -535,6 +539,8 @@ def serve(args):
             if method == "resources.keys":
                 return self.start_worker(method, lambda worker: {"resourceKeys": self.resources.keys(params, worker)})
             if method == "resources.writeback":
+                if params.get("resourceRoot") is not None:
+                    raise ValueError("写回仅支持 GIMI 的 Mods 目录")
                 return self.start_worker(method, self.resources.writeback)
             if method == "updates.check":
                 return self.check(params)

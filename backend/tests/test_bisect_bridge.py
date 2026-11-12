@@ -12,6 +12,35 @@ class BisectBridgeTest(unittest.TestCase):
         self.assertEqual(event['state'], 'succeeded', event)
         return event['result']['bisect']
 
+    def test_scan_pins_a_configured_resource_directory_until_restore(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            gimi = root / 'GIMI'
+            extra = root / 'Extra'
+            for directory in (gimi / 'Mods', extra):
+                for name in ('A', 'B'):
+                    mod = directory / name
+                    mod.mkdir(parents=True)
+                    (mod / 'main.ini').write_text('[Constants]\n')
+            client = Client(root / 'data')
+            try:
+                patch = {'gimi_folder': str(gimi), 'resource_folders': [str(extra)]}
+                self.assertIn('result', client.call('config.patch', patch=patch))
+                self.assertIn('error', client.call('bisect.scan', root=str(root)))
+                state = self.task(client, 'bisect.scan', root=str(extra))
+                self.assertEqual(Path(state['root']), extra)
+                second = client.call('bisect.scan')
+                self.assertEqual(client.finished(second['result']['taskId'])['state'], 'failed')
+                state = self.task(client, 'bisect.toggle', sessionId=state['sessionId'],
+                                  generation=state['generation'], groupId='root.1', enabled=False)
+                self.assertTrue((extra / 'DISABLED A/main.ini').is_file())
+                self.assertTrue((gimi / 'Mods/A/main.ini').is_file())
+                self.task(client, 'bisect.restore', sessionId=state['sessionId'],
+                          generation=state['generation'])
+                self.assertTrue((extra / 'A/main.ini').is_file())
+            finally:
+                client.close()
+
     def test_scan_split_independent_toggle_and_restore_without_game_confirmation(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

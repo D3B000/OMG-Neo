@@ -205,6 +205,46 @@ void main() {
     });
     await tester.pumpAndSettle();
     expect(find.text('资源操作未完成'), findsOneWidget);
+    const extra = r'G:\Test\Extra Mods';
+    void changeFolders(List<String> paths) {
+      backend.settings['gimi_folder'] = r'G:\Test\GIMI';
+      backend.settings['resource_folders'] = paths;
+      backend.stream.add({'event': 'config.changed', 'data': backend.snapshot});
+    }
+
+    void finishListing() {
+      backend.stream.add({
+        'event': 'task.finished',
+        'data': {
+          'taskId': 'first',
+          'kind': 'resources.list',
+          'state': 'succeeded',
+          'message': 'loaded',
+          'result': {
+            'resources': {'relativePath': '', 'revision': 1, 'items': []}
+          },
+        }
+      });
+    }
+
+    changeFolders([extra]);
+    await tester.pumpAndSettle();
+    finishListing();
+    await tester.pumpAndSettle();
+    final switchRoot = find.byTooltip('切换资源目录');
+    await tester.tap(switchRoot);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(extra));
+    await tester.pumpAndSettle();
+    expect(backend.parameters['resources.list']?['resourceRoot'], extra);
+    expect(backend.parameters['resources.list']?['path'], '');
+    finishListing();
+    await tester.pumpAndSettle();
+    expect(find.text('Extra Mods'), findsOneWidget);
+    changeFolders([]);
+    await tester.pumpAndSettle();
+    expect(switchRoot, findsNothing);
+    expect(backend.parameters['resources.list']?['resourceRoot'], isNull);
     await tester.pumpWidget(const SizedBox());
   });
 

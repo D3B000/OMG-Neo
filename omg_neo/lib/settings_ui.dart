@@ -21,6 +21,7 @@ class SettingsDraft {
   final game = TextEditingController(), gimi = TextEditingController();
   final command = TextEditingController(), dlls = TextEditingController();
   final accent = TextEditingController(text: '#39C5BB');
+  final resourceFolders = <String>[];
   void load(Map<String, dynamic> config) {
     game.text = config['game_folder'] as String;
     gimi.text = config['gimi_folder'] as String;
@@ -38,6 +39,9 @@ class SettingsDraft {
     custom = config['custom_launch_enabled'] == true;
     libraries = config['extra_libraries_enabled'] == true;
     selectedEntry = null;
+    resourceFolders
+      ..clear()
+      ..addAll((config['resource_folders'] as List? ?? []).cast<String>());
     whitelist
       ..clear()
       ..addAll((config['gimi_update_whitelist'] as List)
@@ -48,6 +52,7 @@ class SettingsDraft {
   Map<String, dynamic> toSettings() => {
         'game_folder': game.text.trim(),
         'gimi_folder': gimi.text.trim(),
+        'resource_folders': resourceFolders.toList(),
         'hunting': hunting,
         'warning': warning,
         'auto_check_update': autoCheck,
@@ -383,7 +388,64 @@ class _NeoSettingsState extends State<NeoSettings> {
               alignment: Alignment.centerLeft,
               child: button('导入 OMGLite 配置', widget.onImport!)),
         ],
+        section('MOD RESOURCES', '模组资源'),
+        ValueListenableBuilder(
+          valueListenable: d.gimi,
+          builder: (_, value, __) {
+            final path = value.text.trim();
+            if (path.isEmpty) return const SizedBox.shrink();
+            final separator =
+                path.endsWith('/') || path.endsWith('\\') ? '' : '\\';
+            return resourceFolder('$path${separator}Mods');
+          },
+        ),
+        for (final entry in d.resourceFolders)
+          resourceFolder(entry, remove: () {
+            setState(() => d.resourceFolders.remove(entry));
+            widget.onChanged?.call();
+          }),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: button('添加资源目录', () async {
+            final path = (await enterPath('添加资源目录'))?.trim();
+            if (!mounted || path == null || path.isEmpty) return;
+            String key(String value) => value
+                .replaceAll('/', '\\')
+                .toLowerCase()
+                .replaceFirst(RegExp(r'\\+$'), '');
+            final gimi = key(d.gimi.text.trim());
+            if ((gimi.isNotEmpty && key(path) == '$gimi\\mods') ||
+                d.resourceFolders.any((entry) => key(entry) == key(path))) {
+              return;
+            }
+            setState(() => d.resourceFolders.add(path));
+            widget.onChanged?.call();
+          }),
+        ),
       ];
+
+  Widget resourceFolder(String path, {VoidCallback? remove}) => Container(
+      constraints: const BoxConstraints(minHeight: 40),
+      decoration:
+          BoxDecoration(border: Border(bottom: BorderSide(color: c.rule))),
+      child: Row(children: [
+        Icon(Icons.folder_outlined, color: c.ink2, size: 17),
+        const SizedBox(width: 10),
+        Expanded(
+            child: Tooltip(
+                message: path,
+                child: Text(path,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: EfType.ui(12, color: c.ink)))),
+        if (remove == null)
+          Text('GIMI 默认', style: EfType.ui(11, color: c.ink2))
+        else
+          IconButton(
+              tooltip: '移除资源目录',
+              onPressed: remove,
+              icon: Icon(Icons.close, color: c.ink2, size: 16)),
+      ]));
   Widget pathField(
           String id, String name, TextEditingController controller, String hint,
           {String? help}) =>

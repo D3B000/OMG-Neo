@@ -7,20 +7,15 @@ import 'ef/tokens.dart';
 import 'ef/widgets.dart';
 import 'ef/toast.dart';
 import 'ef/marks.dart';
+import 'resource_root_menu.dart';
 
 /// Manual recursive group controls; no game testing or answer workflow.
 class NeoBisect extends StatefulWidget {
   const NeoBisect(
-      {super.key,
-      this.controller,
-      required this.onBack,
-      this.region,
-      this.pickPath});
+      {super.key, this.controller, required this.onBack, this.region});
   final NeoController? controller;
   final VoidCallback onBack;
   final Widget Function(String, Widget)? region;
-  final Future<String?> Function({required bool folder, String initial})?
-      pickPath;
   @override
   State<NeoBisect> createState() => _NeoBisectState();
 }
@@ -34,6 +29,19 @@ class _NeoBisectState extends State<NeoBisect> {
   Map<String, dynamic> get data => controller?.bisectState ?? {};
   String get phase => data['status'] as String? ?? 'idle';
   bool get available => controller?.ready == true && controller?.busy == false;
+  List<String> get resourceFolders => controller?.resourceFolders ?? [];
+  bool get hasDefaultRoot =>
+      (controller?.settings['gimi_folder'] as String? ?? '').isNotEmpty;
+  String? get scanRoot => resourceFolders.contains(chosenRoot)
+      ? chosenRoot
+      : hasDefaultRoot
+          ? null
+          : resourceFolders.firstOrNull;
+  bool get canChooseRoot =>
+      available &&
+      !showSession &&
+      controller?.bisectActive != true &&
+      controller?.closing != true;
   bool get editable =>
       available && phase == 'ready' && (data['errors'] as List? ?? []).isEmpty;
   EfColors get c => EfColors.of(context);
@@ -80,10 +88,11 @@ class _NeoBisectState extends State<NeoBisect> {
 
   void run(String action, [Map<String, dynamic> extra = const {}]) {
     if (!available) return;
+    final root = action == 'scan' ? scanRoot : null;
     unawaited(controller!.businessTask('bisect.$action', {
       'sessionId': data['sessionId'],
       'generation': data['generation'],
-      if (action == 'scan' && chosenRoot != null) 'root': chosenRoot,
+      if (root != null) 'root': root,
       ...extra,
     }));
   }
@@ -106,6 +115,7 @@ class _NeoBisectState extends State<NeoBisect> {
     }
     sessionId = next;
     hadWorkspace = showSession;
+    if (!resourceFolders.contains(chosenRoot)) chosenRoot = null;
     setState(() {});
   }
 
@@ -118,11 +128,12 @@ class _NeoBisectState extends State<NeoBisect> {
       {bool primary = false,
       Key? key,
       double height = 28,
-      double fontSize = 10,
+      double fontSize = 11,
       bool navigation = false,
       Color? fill,
       Color? foreground,
-      double padding = 9}) {
+      double padding = 9,
+      bool focusBorder = true}) {
     final enabled = tap != null && (navigation || available);
     final background = fill ?? (primary ? c.ink : c.chip);
     final ink = foreground ?? (primary ? c.paper : c.ink);
@@ -134,14 +145,8 @@ class _NeoBisectState extends State<NeoBisect> {
         foreground: ink,
         height: height,
         fontSize: fontSize,
-        padding: padding);
-  }
-
-  Future<void> changeDirectory() async {
-    final path = await widget.pickPath?.call(
-        folder: true, initial: chosenRoot ?? data['root'] as String? ?? '');
-    if (!mounted || path == null || path.isEmpty) return;
-    setState(() => chosenRoot = path);
+        padding: padding,
+        focusBorder: focusBorder);
   }
 
   Widget pair(String en, String zh, {double size = 15}) => Column(
@@ -400,7 +405,8 @@ class _NeoBisectState extends State<NeoBisect> {
                                                   BorderSide(color: c.rule))),
                                       child: Row(children: [
                                         Text('${i + 1}'.padLeft(2, '0'),
-                                            style: EfType.ui(8, color: c.ink2)),
+                                            style:
+                                                EfType.ui(10, color: c.ink2)),
                                         const SizedBox(width: 10),
                                         Expanded(
                                             child: Column(
@@ -448,7 +454,8 @@ class _NeoBisectState extends State<NeoBisect> {
             {bool back = false, Key? key}) =>
         button(title, tap,
             key: key,
-            height: 28,
+            height: 30,
+            fontSize: 11,
             navigation: back,
             fill: back ? c.signal : const Color(0xff303030),
             foreground: back ? c.onSignal : const Color(0xffededed));
@@ -515,7 +522,6 @@ class _NeoBisectState extends State<NeoBisect> {
             ...path.skip(path.length - 2)
           ]
         : path.cast<Map<String, dynamic>?>();
-    final directory = '${chosenRoot ?? data['root'] ?? '设置中的 GIMI\\Mods'}';
     return Container(
         height: 30,
         padding: const EdgeInsets.symmetric(horizontal: 22),
@@ -560,28 +566,25 @@ class _NeoBisectState extends State<NeoBisect> {
                 fontSize: 9,
                 navigation: true,
                 fill: c.signal,
-                foreground: c.onSignal)
-          else
-            Tooltip(
-                message: directory,
-                child: SizedBox(
-                    width: 220,
-                    child: Text(directory,
-                        key: const ValueKey('bisect.directory'),
-                        textAlign: TextAlign.right,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: EfType.ui(8, color: c.ink2)))),
-          const SizedBox(width: 8),
-          button(
-              '更换目录',
-              ['idle', 'closed'].contains(phase) && widget.pickPath != null
-                  ? changeDirectory
-                  : null,
-              height: 23,
-              fontSize: 9,
-              padding: 6,
-              key: const ValueKey('bisect.changeDirectory')),
+                foreground: c.onSignal),
+          if (resourceFolders.isNotEmpty)
+            mark(
+              'bisect.rootMenu',
+              ResourceRootMenu(
+                folders: resourceFolders,
+                hasDefault: hasDefaultRoot,
+                selected: showSession
+                    ? resourceFolders
+                        .where((path) => path == data['root'])
+                        .firstOrNull
+                    : scanRoot,
+                onSelected: canChooseRoot
+                    ? (path) {
+                        if (canChooseRoot) setState(() => chosenRoot = path);
+                      }
+                    : null,
+              ),
+            ),
         ]));
   }
 
@@ -613,7 +616,7 @@ class _NeoBisectState extends State<NeoBisect> {
                     children: [
                       Row(children: [
                         Expanded(
-                            child: pair('GROUP CONTROLS', '操作面板', size: 14)),
+                            child: pair('GROUP CONTROLS', '操作面板', size: 16)),
                         if (n != null) badge(n)
                       ]),
                       const SizedBox(height: 6),
@@ -644,7 +647,7 @@ class _NeoBisectState extends State<NeoBisect> {
                                 : null,
                             fill: c.signal,
                             foreground: c.onSignal,
-                            height: 28,
+                            height: 32,
                             key: ValueKey('group.toggle.${n['id']}')),
                         const SizedBox(height: 6),
                         Row(children: [
@@ -656,16 +659,16 @@ class _NeoBisectState extends State<NeoBisect> {
                                           count(n) > 1
                                       ? () => run('split', {'groupId': n['id']})
                                       : null,
-                                  height: 25,
-                                  fontSize: 9,
+                                  height: 28,
+                                  fontSize: 10,
                                   padding: 6,
                                   key: ValueKey('group.split.${n['id']}'))),
                           const SizedBox(width: 6),
                           Expanded(
                               child: button('查看模组 ↗', () => groupMods(n),
                                   navigation: true,
-                                  height: 25,
-                                  fontSize: 9,
+                                  height: 28,
+                                  fontSize: 10,
                                   padding: 6,
                                   key: ValueKey('group.mods.${n['id']}'))),
                         ]),
@@ -717,7 +720,7 @@ class _NeoBisectState extends State<NeoBisect> {
                                   child: Text(name(n),
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
-                                      style: EfType.ui(12,
+                                      style: EfType.ui(14,
                                           weight: 700, color: c.paper)))),
                           badge(n, inverse: true)
                         ]),
@@ -730,7 +733,7 @@ class _NeoBisectState extends State<NeoBisect> {
                                       fit: BoxFit.scaleDown,
                                       alignment: Alignment.bottomLeft,
                                       child: Text('${count(n)}',
-                                          style: EfType.ui(44,
+                                          style: EfType.ui(48,
                                               weight: 600,
                                               height: 1.05,
                                               color: c.paper)))),
@@ -739,13 +742,15 @@ class _NeoBisectState extends State<NeoBisect> {
                                   padding: const EdgeInsets.only(bottom: 6),
                                   child: Text(
                                       '个模组 / 启用 ${n['enabledCount'] ?? 0}',
-                                      style: EfType.ui(8, color: c.paper))),
+                                      style: EfType.ui(10, color: c.paper))),
                             ])),
                       ])))));
 
   Widget contextNode(Map<String, dynamic>? n, {bool parent = false}) =>
       Material(
           color: c.panel,
+          shape: efCut(br: 10),
+          clipBehavior: Clip.antiAlias,
           child: Container(
               decoration: BoxDecoration(
                   border: Border(left: BorderSide(color: c.ink, width: 2))),
@@ -767,14 +772,14 @@ class _NeoBisectState extends State<NeoBisect> {
                                       weight: 700, color: c.ink)))),
                       const SizedBox(width: 6),
                       Text(n == null ? '—' : '${count(n)}',
-                          style: EfType.ui(21,
+                          style: EfType.ui(24,
                               weight: 600, height: 1.2, color: c.ink)),
                       const SizedBox(width: 6),
                       button(parent ? '←' : '查看',
                           n == null ? null : () => selectGroup('${n['id']}'),
                           navigation: true,
-                          height: 24,
-                          fontSize: 9,
+                          height: 28,
+                          fontSize: 10,
                           padding: 5,
                           key: ValueKey(
                               parent ? 'group.parent' : 'group.sibling')),
@@ -819,13 +824,13 @@ class _NeoBisectState extends State<NeoBisect> {
                                     fit: BoxFit.scaleDown,
                                     alignment: Alignment.centerLeft,
                                     child: Text('${count(n)}',
-                                        style: EfType.ui(34,
+                                        style: EfType.ui(38,
                                             weight: 600,
                                             height: 1.1,
                                             color: c.ink)))),
                             const SizedBox(width: 8),
                             Text('个模组 / 启用 ${n['enabledCount'] ?? 0}',
-                                style: EfType.ui(8, color: c.ink2)),
+                                style: EfType.ui(10, color: c.ink2)),
                           ])),
                       Row(children: [
                         Expanded(
@@ -871,7 +876,8 @@ class _NeoBisectState extends State<NeoBisect> {
                   const SizedBox(height: 14),
                   button('记录已启用模组 →', () => run('scan'),
                       primary: true,
-                      height: 34,
+                      height: 36,
+                      focusBorder: false,
                       key: const ValueKey('bisect.scan')),
                   if (controller?.error != null) ...[
                     const SizedBox(height: 8),
@@ -917,24 +923,24 @@ class _NeoBisectState extends State<NeoBisect> {
                 child: CustomPaint(
                     painter: _BranchWires(c.ink2, sibling != null,
                         next.isNotEmpty, next.length > 1)))),
-        at('bisect.parent', const Rect.fromLTWH(28, 262, 230, 80),
+        at('bisect.parent', const Rect.fromLTWH(22, 260, 270, 82),
             contextNode(parent, parent: true)),
         if (sibling != null)
-          at('bisect.sibling', const Rect.fromLTWH(370, 286, 220, 56),
+          at('bisect.sibling', const Rect.fromLTWH(391, 278, 250, 64),
               contextNode(sibling)),
         at(
             'bisect.current',
-            const Rect.fromLTWH(370, 143, 220, 108),
+            const Rect.fromLTWH(391, 133, 250, 112),
             KeyedSubtree(
                 key: ValueKey('graph.current.${n['id']}'),
                 child: currentNode(n))),
         if (next.isNotEmpty)
-          at('bisect.child.1', const Rect.fromLTWH(696, 28, 222, 112),
+          at('bisect.child.1', const Rect.fromLTWH(707, 22, 237, 120),
               childNode(next[0]))
         else
           at(
               'bisect.next',
-              const Rect.fromLTWH(696, 100, 222, 110),
+              const Rect.fromLTWH(707, 100, 237, 116),
               Material(
                   color: c.panel,
                   child: Padding(
@@ -953,68 +959,12 @@ class _NeoBisectState extends State<NeoBisect> {
                                 size: 10)
                           ])))),
         if (next.length > 1)
-          at('bisect.child.2', const Rect.fromLTWH(696, 234, 222, 112),
+          at('bisect.child.2', const Rect.fromLTWH(707, 222, 237, 120),
               childNode(next[1])),
-        at('bisect.controls', const Rect.fromLTWH(28, 18, 260, 180),
+        at('bisect.controls', const Rect.fromLTWH(22, 16, 300, 178),
             operatorPanel()),
       ]);
     }));
-  }
-
-  Widget footer() {
-    final n = group, parent = node(n?['parent']);
-    return SizedBox(
-        height: 76,
-        child: Stack(children: [
-          Positioned(
-              left: 22,
-              top: 26,
-              width: 90,
-              height: 25,
-              child: button('← 上一级',
-                  parent == null ? null : () => selectGroup('${parent['id']}'),
-                  navigation: true,
-                  height: 25,
-                  fontSize: 9,
-                  padding: 6,
-                  key: const ValueKey('bisect.up'))),
-          Positioned(
-              left: 117,
-              top: 26,
-              child: button(
-                  '撤销',
-                  editable &&
-                          maps(data['history']).any((h) =>
-                              ['enable', 'disable'].contains(h['type']) &&
-                              h['undone'] != true)
-                      ? () => run('undo')
-                      : null,
-                  height: 25,
-                  fontSize: 9,
-                  padding: 6)),
-          Positioned(
-              right: 22,
-              top: 8,
-              child: Text(
-                  '第 ${ancestors().isEmpty ? 0 : ancestors().length - 1} 层 / '
-                  '${showSession ? data['groupCount'] ?? 0 : 0} 个末级组',
-                  style: EfType.ui(8, color: c.ink2))),
-          Positioned(
-              right: 22,
-              top: 26,
-              width: 90,
-              height: 25,
-              child: button(
-                  '末级组再二分',
-                  editable &&
-                          nodes.any((n) => children(n).isEmpty && count(n) > 1)
-                      ? () => run('splitLeaves')
-                      : null,
-                  height: 25,
-                  fontSize: 9,
-                  padding: 6,
-                  key: const ValueKey('group.splitLeaves'))),
-        ]));
   }
 
   @override
@@ -1022,7 +972,7 @@ class _NeoBisectState extends State<NeoBisect> {
         command(),
         pathBar(),
         Expanded(child: canvas()),
-        footer(),
+        const SizedBox(height: 28),
       ]);
 }
 
@@ -1039,42 +989,42 @@ class _BranchWires extends CustomPainter {
       ..color = color.withValues(alpha: .7)
       ..strokeWidth = 1
       ..style = PaintingStyle.stroke;
-    final junctionY = sibling ? (197.0 + 314.0) / 2 : 197.0;
+    final junctionY = sibling ? (189.0 + 310.0) / 2 : 189.0;
     final parent = Path()
-      ..moveTo(370, 197)
-      ..lineTo(314, 197);
+      ..moveTo(391, 189)
+      ..lineTo(357, 189);
     if (sibling) {
       parent
-        ..lineTo(314, 314)
-        ..lineTo(370, 314);
+        ..lineTo(357, 310)
+        ..lineTo(391, 310);
     }
     parent
-      ..moveTo(258, 302)
-      ..lineTo(286, 302)
-      ..lineTo(286, junctionY)
-      ..lineTo(314, junctionY);
+      ..moveTo(292, 301)
+      ..lineTo(324.5, 301)
+      ..lineTo(324.5, junctionY)
+      ..lineTo(357, junctionY);
     canvas.drawPath(parent, paint);
     if (firstChild) {
       canvas.drawPath(
           Path()
-            ..moveTo(590, 197)
-            ..lineTo(642, 197)
-            ..lineTo(642, 84)
-            ..lineTo(696, 84),
+            ..moveTo(641, 189)
+            ..lineTo(674, 189)
+            ..lineTo(674, 82)
+            ..lineTo(707, 82),
           paint);
     }
     if (secondChild) {
       canvas.drawPath(
           Path()
-            ..moveTo(642, 197)
-            ..lineTo(642, 290)
-            ..lineTo(696, 290),
+            ..moveTo(674, 189)
+            ..lineTo(674, 282)
+            ..lineTo(707, 282),
           paint);
     }
     final leader = Path()
-      ..moveTo(288, 152)
-      ..lineTo(326, 152)
-      ..lineTo(370, 178);
+      ..moveTo(322, 152)
+      ..lineTo(350, 152)
+      ..lineTo(391, 172);
     for (final metric in leader.computeMetrics()) {
       for (double start = 0; start < metric.length; start += 8) {
         canvas.drawPath(
@@ -1103,12 +1053,14 @@ class _BranchAction extends StatefulWidget {
       required this.height,
       required this.fontSize,
       required this.padding,
-      this.actionKey});
+      this.actionKey,
+      required this.focusBorder});
   final String label;
   final VoidCallback? onTap;
   final Color background, foreground;
   final double height, fontSize, padding;
   final Key? actionKey;
+  final bool focusBorder;
   @override
   State<_BranchAction> createState() => _BranchActionState();
 }
@@ -1118,8 +1070,9 @@ class _BranchActionState extends State<_BranchAction> {
   @override
   Widget build(BuildContext context) {
     final c = EfColors.of(context), enabled = widget.onTap != null;
-    final active = enabled && (hovered || pressed);
-    final duration = Ef.d(context, pressed ? Ef.press : Ef.wipe);
+    final active =
+        enabled && (hovered || pressed || focused && !widget.focusBorder);
+    final duration = Ef.d(context, pressed ? Ef.press : Ef.hover);
     return Semantics(
         button: true,
         enabled: enabled,
@@ -1127,7 +1080,7 @@ class _BranchActionState extends State<_BranchAction> {
             color: enabled ? widget.background : c.chip.withValues(alpha: .55),
             shape: efCut(
                 br: 7,
-                side: focused && enabled
+                side: focused && enabled && widget.focusBorder
                     ? BorderSide(color: c.trace, width: 2)
                     : BorderSide.none),
             clipBehavior: Clip.antiAlias,
@@ -1164,13 +1117,17 @@ class _BranchActionState extends State<_BranchAction> {
                                   style: EfType.ui(widget.fontSize,
                                       weight: 700,
                                       width: 100,
-                                      height: 1.4,
+                                      height: 1.2,
                                       color: !enabled
                                           ? c.ink2.withValues(alpha: .45)
                                           : active
                                               ? c.onSignal
                                               : widget.foreground),
                                   child: Text(widget.label,
+                                      textHeightBehavior:
+                                          const TextHeightBehavior(
+                                              leadingDistribution:
+                                                  TextLeadingDistribution.even),
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis)))),
                     ])))));

@@ -24,6 +24,36 @@ class WiringTests(unittest.TestCase):
         reply = client.call("config.patch", patch={"gimi_folder": str(gimi), "auto_check_update": False})
         self.assertIn("result", reply, reply)
 
+    def test_configured_resource_root_isolated_from_default_and_stale_handles(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            gimi, extra = root / "gimi", root / "extra"
+            for folder in (gimi / "Mods", extra):
+                mod = folder / "Outfit"
+                mod.mkdir(parents=True)
+                (mod / "main.ini").write_text("[KeyOutfit]\nkey=X\n")
+            client = Client(root / "data")
+            try:
+                self.config(client, gimi)
+                reply = client.call("config.patch", patch={"resource_folders": [str(extra)]})
+                self.assertEqual(reply["result"]["settings"]["resource_folders"], [str(extra)])
+                listing = self.task(client, "resources.list", resourceRoot=str(extra))["result"]["resources"]
+                self.assertEqual(Path(listing["root"]), extra)
+                item = listing["items"][0]
+                handle = {"id": item["id"], "revision": listing["revision"]}
+                self.assertIn("error", client.call("resources.configs", **handle))
+                self.assertIn("result", client.call("resources.configs", resourceRoot=str(extra), **handle))
+                toggled = self.task(client, "resources.toggle", resourceRoot=str(extra),
+                                    enabled=False, **handle)
+                self.assertEqual(toggled["state"], "succeeded", toggled)
+                self.assertTrue((gimi / "Mods/Outfit").is_dir())
+                self.assertFalse((extra / "Outfit").exists())
+                self.assertIn("error", client.call("resources.writeback", resourceRoot=str(extra)))
+                client.call("config.patch", patch={"resource_folders": []})
+                self.assertIn("error", client.call("resources.directory", resourceRoot=str(extra)))
+            finally:
+                client.close()
+
     def test_search_scope_and_installed_release_notes_persist(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

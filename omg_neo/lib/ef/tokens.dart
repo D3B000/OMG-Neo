@@ -137,6 +137,7 @@ abstract final class Ef {
   static const snap = Cubic(0.16, 1, 0.3, 1); // arrives fast, settles
   static const mech = Cubic(0.7, 0, 0.2, 1); // starts slow, stops hard
   static const press = Duration(milliseconds: 100);
+  static const hover = Duration(milliseconds: 150);
   static const wipe = Duration(milliseconds: 280);
   static const row = Duration(milliseconds: 200);
   static const tabOut = Duration(milliseconds: 400);

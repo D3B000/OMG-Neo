@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:ui' as ui;
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
+import 'resource_root_menu.dart';
 import 'ef/menus.dart';
 import 'backend/neo_controller.dart';
 import 'ef/marks.dart';
@@ -100,6 +101,7 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
   Timer? searchTimer;
   String? inlineError;
   String? loadedPath;
+  String? observedRoot;
   @override
   void dispose() {
     searchTimer?.cancel();
@@ -155,6 +157,7 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
   @override
   void initState() {
     super.initState();
+    observedRoot = live?.resourceRoot;
     scheduleLoad();
   }
 
@@ -166,6 +169,15 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
 
   void scheduleLoad() {
     if (live == null) return;
+    if (observedRoot != live!.resourceRoot) {
+      observedRoot = live!.resourceRoot;
+      searchTimer?.cancel();
+      d.search.clear();
+      d.scrollPositions.clear();
+      d.path.clear();
+      loadedPath = null;
+      inlineError = null;
+    }
     d.scope = live!.resourceSearchScope == 'global' ? '全局' : '当前目录';
     if (!live!.resourcesLoaded && epoch != live!.resourceEpoch) {
       epoch = live!.resourceEpoch;
@@ -405,7 +417,9 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
                 reload();
               }, enabled: live == null || available || live!.canReconnect),
               const SizedBox(width: 6),
-              button('写回', confirmWriteback),
+              button('写回', confirmWriteback,
+                  enabled: live?.resourceRoot == null &&
+                      (live == null || available)),
               if (live?.writebackLogs.isNotEmpty == true) ...[
                 const SizedBox(width: 6),
                 button(
@@ -456,7 +470,8 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
                       child: SingleChildScrollView(
                           scrollDirection: Axis.horizontal,
                           child: Row(children: [
-                            button('Mods', () => navigate([]),
+                            button(rootLabel(live?.resourceRoot),
+                                () => navigate([]),
                                 key: const ValueKey('resources.root'),
                                 active: d.path.isEmpty,
                                 compact: true),
@@ -471,6 +486,15 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
                             ],
                           ]))),
                   const SizedBox(width: 10),
+                  if (live?.resourceFolders.isNotEmpty == true)
+                    ResourceRootMenu(
+                      folders: live!.resourceFolders,
+                      hasDefault:
+                          (live!.settings['gimi_folder'] as String? ?? '')
+                              .isNotEmpty,
+                      selected: live!.resourceRoot,
+                      onSelected: available ? live!.selectResourceRoot : null,
+                    ),
                   SizedBox(
                       width: 28,
                       height: 28,
@@ -484,6 +508,10 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
                           icon: const Icon(Icons.folder_open_outlined,
                               size: 17))),
                   const SizedBox(width: 4),
+                  SizedBox(
+                      height: 16,
+                      child: VerticalDivider(
+                          width: 10, thickness: 1, color: c.rule)),
                   directoryMenu(false),
                   const SizedBox(width: 4),
                   directoryMenu(true),
@@ -668,7 +696,8 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
                   height: 16,
                   child: checked ? const Icon(Icons.check, size: 14) : null),
               onPressed: change,
-              child: Text(label)));
+              child:
+                  Text(label, maxLines: 1, overflow: TextOverflow.ellipsis)));
 
   Widget settingsMenu() => MenuAnchor(
       style: resourceMenuStyle(context),
@@ -687,6 +716,10 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
           () => controller.isOpen ? controller.close() : controller.open(),
           enabled: live?.closing != true));
 
+  String rootLabel(String? root) => root == null
+      ? 'Mods'
+      : root.split(RegExp(r'[/\\]')).where((part) => part.isNotEmpty).last;
+
   Widget directoryMenu(bool ini) => Builder(
       builder: (anchor) => SizedBox(
             width: 28,
@@ -697,12 +730,15 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
               tooltip: ini ? '当前目录的 INI 文件' : '当前目录的所有文件夹',
               padding: EdgeInsets.zero,
               icon: Icon(
-                  ini ? Icons.description_outlined : Icons.folder_outlined,
+                  ini
+                      ? Icons.description_outlined
+                      : Icons.account_tree_outlined,
                   size: 17),
               onPressed: live != null && !available
                   ? null
                   : () async {
                       final path = d.path.join('/');
+                      final root = live?.resourceRoot;
                       try {
                         final List entries;
                         if (live != null) {
@@ -731,6 +767,7 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
                         }
                         if (!mounted ||
                             !anchor.mounted ||
+                            live?.resourceRoot != root ||
                             d.path.join('/') != path) {
                           return;
                         }
@@ -777,6 +814,7 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
                         );
                         if (!mounted ||
                             selected == null ||
+                            live?.resourceRoot != root ||
                             d.path.join('/') != path) {
                           return;
                         }
@@ -787,7 +825,7 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
                           navigate(selected.split('/'));
                         }
                       } catch (error) {
-                        if (mounted) {
+                        if (mounted && live?.resourceRoot == root) {
                           setState(() => inlineError = '$error');
                         }
                       }
@@ -1044,15 +1082,6 @@ class _ResourceBrowserState extends State<ResourceBrowser> {
     );
   }
 }
-
-MenuStyle resourceMenuStyle(BuildContext context) => MenuStyle(
-      backgroundColor: WidgetStatePropertyAll(EfColors.of(context).panel),
-      surfaceTintColor: const WidgetStatePropertyAll(Colors.transparent),
-      elevation: const WidgetStatePropertyAll(0),
-      shape: WidgetStatePropertyAll(
-          efCut(br: 8, side: BorderSide(color: EfColors.of(context).rule))),
-      padding: const WidgetStatePropertyAll(EdgeInsets.all(4)),
-    );
 
 class ResourceCardMenu extends StatefulWidget {
   const ResourceCardMenu(

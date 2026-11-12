@@ -165,9 +165,7 @@ void main() {
       WidgetTester tester, Map<String, dynamic> state,
       {Brightness theme = Brightness.light,
       bool reducedMotion = false,
-      Size size = const Size(960, 540),
-      Future<String?> Function({required bool folder, String initial})?
-          pickPath}) async {
+      Size size = const Size(960, 540)}) async {
     await binding.setSurfaceSize(size);
     await fonts();
     final backend = FixtureBackend()..replies['bisect.state'] = state;
@@ -187,7 +185,6 @@ void main() {
                 child: NeoBisect(
                     controller: controller,
                     onBack: () {},
-                    pickPath: pickPath,
                     region: (id, child) => KeyedSubtree(
                         key: ValueKey('test.$id'), child: child))))));
     await tester.pumpAndSettle();
@@ -266,7 +263,7 @@ void main() {
     controller.busy = false;
     controller.notifyListeners();
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('bisect.up')));
+    await tester.tap(find.byKey(const ValueKey('group.parent')));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('graph.current.root.1')), findsOneWidget);
     expect(backend.calls.where((s) => s == 'bisect.toggle'), isEmpty);
@@ -300,7 +297,7 @@ void main() {
       expect(tester.widget<FractionallySizedBox>(fill).widthFactor, 0);
       await mouse.moveTo(tester.getCenter(button));
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 140));
+      await tester.pump(const Duration(milliseconds: 75));
       final midway = tester.widget<FractionallySizedBox>(fill).widthFactor!;
       expect(midway, greaterThan(0));
       expect(midway, lessThan(1));
@@ -308,7 +305,7 @@ void main() {
       expect(tester.widget<FractionallySizedBox>(fill).widthFactor, 1);
       await mouse.moveTo(const Offset(4, 530));
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 140));
+      await tester.pump(const Duration(milliseconds: 75));
       final retreat = tester.widget<FractionallySizedBox>(fill);
       expect(retreat.alignment, Alignment.centerLeft);
       expect(retreat.widthFactor, greaterThan(0));
@@ -360,20 +357,43 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('selected directory affects only the next recording',
+  testWidgets('recording uses the configured GIMI Mods directory',
       (tester) async {
-    final (_, backend) = await prepare(tester, {'status': 'idle'},
-        pickPath: ({required bool folder, String initial = ''}) async {
-      expect(folder, isTrue);
-      return r'G:\Other Mods';
-    });
-    await tester.tap(find.byKey(const ValueKey('bisect.changeDirectory')));
+    final (_, backend) = await prepare(tester, {'status': 'idle'});
+    expect(find.text('更换目录'), findsNothing);
+    backend.replies['bisect.scan'] = {'taskId': 'scan'};
+    await tester.tap(find.byKey(const ValueKey('bisect.scan')));
+    await tester.pump();
+    expect(backend.parameters['bisect.scan']?.containsKey('root'), isFalse);
+  });
+
+  testWidgets('recording uses the selected resource directory and locks it',
+      (tester) async {
+    final (controller, backend) = await prepare(tester, {'status': 'idle'});
+    const extra = r'G:\Test\Extra Mods';
+    controller.settings = {
+      'gimi_folder': r'G:\Test\GIMI',
+      'resource_folders': [extra],
+    };
+    controller.notifyListeners();
+    await tester.pumpAndSettle();
+    final menu = find.byTooltip('切换资源目录');
+    final trigger = find.ancestor(of: menu, matching: find.byType(IconButton));
+    await tester.tap(menu);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(extra));
     await tester.pumpAndSettle();
     backend.replies['bisect.scan'] = {'taskId': 'scan'};
     await tester.tap(find.byKey(const ValueKey('bisect.scan')));
     await tester.pump();
-    expect(backend.parameters['bisect.scan']?['root'], r'G:\Other Mods');
-    expect(backend.calls, isNot(contains('config.patch')));
+    expect(backend.parameters['bisect.scan']?['root'], extra);
+    expect(tester.widget<IconButton>(trigger).onPressed, isNull);
+    controller.busy = false;
+    controller.bisectState = {...fixture(fourGroups: true), 'root': extra};
+    controller.notifyListeners();
+    await tester.pumpAndSettle();
+    expect(tester.widget<IconButton>(trigger).onPressed, isNull);
+    expect(controller.resourceRoot, isNull);
   });
 
   testWidgets('restore clears graph and new session starts at A',
@@ -477,21 +497,19 @@ void main() {
       expect(canvas.left, 0);
       expect(canvas.width, 960);
       expect(canvas.top, 118);
-      expect(controls.left, 28);
-      expect(controls.width, 260);
-      expect(focus.left, 370);
-      expect(focus.top, closeTo(255.44, 1));
-      final up = tester.getRect(find.byKey(const ValueKey('bisect.up')));
-      final splitAll =
-          tester.getRect(find.byKey(const ValueKey('group.splitLeaves')));
-      expect(up.size, splitAll.size);
-      expect(up.top, splitAll.top);
-      final directory =
-          tester.getRect(find.byKey(const ValueKey('bisect.directory')));
-      final choose =
-          tester.getRect(find.byKey(const ValueKey('bisect.changeDirectory')));
-      expect(choose.right, 938);
-      expect(directory.right, choose.left - 8);
+      expect(canvas.bottom, 512);
+      expect(controls.left, 22);
+      expect(controls.width, 300);
+      expect(focus.left, 391);
+      final lowerCards = ['parent', 'sibling', 'child.2'].map((id) =>
+          tester.getRect(find.byKey(ValueKey('region.bisect.$id'))).bottom);
+      expect(lowerCards, everyElement(closeTo(lowerCards.first, .01)));
+      expect(
+          find.byKey(const ValueKey('region.navigation.bottom')), findsNothing);
+      expect(find.byKey(const ValueKey('bisect.up')), findsNothing);
+      expect(find.byKey(const ValueKey('group.splitLeaves')), findsNothing);
+      expect(
+          find.byKey(const ValueKey('bisect.changeDirectory')), findsNothing);
       final trace = tester.widget<Container>(
           find.byKey(const ValueKey('bisect.current.trace')));
       expect(((trace.decoration as BoxDecoration).border as Border).top.color,
